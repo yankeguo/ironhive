@@ -13,7 +13,7 @@ Retro on the server, modern in the build:
 
 | Path | Role |
 |---|---|
-| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IRONHIVE_LISTEN`, default `:8080`), graceful shutdown |
+| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`), graceful shutdown |
 | `cmd/ironhive-runtime/` | Runtime binary: agent running inside managed containers |
 | `controller/` | Controller package: HTTP server, views, static assets |
 | `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |

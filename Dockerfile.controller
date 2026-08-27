@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 COPY --from=builder /ironhive-controller /ironhive-controller
-ENV IRONHIVE_LISTEN=:8080
+ENV IHC_LISTEN=:8080
 EXPOSE 8080
 ENTRYPOINT ["tini", "--"]
 CMD ["/ironhive-controller"]

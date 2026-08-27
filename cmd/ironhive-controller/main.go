@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	listen := envOr("IRONHIVE_LISTEN", ":8080")
+	listen := envOr("IHC_LISTEN", ":8080")
 	flag.StringVar(&listen, "listen", listen, "http listen address")
 	flag.Parse()
 
