@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,11 @@ import (
 	"strings"
 )
 
+// errBadTar marks errors caused by the archive itself (corrupt stream,
+// malicious entry names, unsupported entry types) as opposed to local
+// filesystem failures, so the handler can answer 400 instead of 500.
+var errBadTar = errors.New("invalid tar archive")
+
 // TarPutHandler serves PUT /v1/tar?path=<dir>: the request body is an
 // uncompressed tar stream extracted into path (created if missing).
 // Regular files and directories are supported; absolute entry names and
@@ -17,24 +23,21 @@ import (
 // overwritten; on a mid-archive error the files extracted so far remain.
 func TarPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("path")
-		if p == "" {
-			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
 			return
 		}
-		p, err := resolveFilePath(p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		unlock := lockPath(p)
 		defer unlock()
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if err := extractTar(r.Body, p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			if errors.Is(err, errBadTar) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -50,7 +53,7 @@ func extractTar(rd io.Reader, dest string) error {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("tar: %w", err)
+			return fmt.Errorf("tar: %w: %v", errBadTar, err)
 		}
 		target, err := joinTarEntry(dest, hdr.Name)
 		if err != nil {
@@ -69,7 +72,7 @@ func extractTar(rd io.Reader, dest string) error {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
 			}
 		default:
-			return fmt.Errorf("tar: unsupported entry type %d (%s)", hdr.Typeflag, hdr.Name)
+			return fmt.Errorf("tar: %w: unsupported entry type %d (%s)", errBadTar, hdr.Typeflag, hdr.Name)
 		}
 	}
 }
@@ -78,11 +81,11 @@ func extractTar(rd io.Reader, dest string) error {
 // absolute names and ".." traversal escaping dest.
 func joinTarEntry(dest, name string) (string, error) {
 	if filepath.IsAbs(name) {
-		return "", fmt.Errorf("tar: absolute entry name %q", name)
+		return "", fmt.Errorf("tar: %w: absolute entry name %q", errBadTar, name)
 	}
 	target := filepath.Join(dest, name)
 	if target != dest && !strings.HasPrefix(target, dest+string(os.PathSeparator)) {
-		return "", fmt.Errorf("tar: entry %q escapes destination", name)
+		return "", fmt.Errorf("tar: %w: entry %q escapes destination", errBadTar, name)
 	}
 	return target, nil
 }

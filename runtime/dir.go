@@ -2,9 +2,11 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -22,23 +24,19 @@ type dirEntry struct {
 // to the process working directory.
 func DirGetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("path")
-		if p == "" {
-			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
 			return
 		}
-		p, err := resolveFilePath(p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		unlock := lockPath(p)
 		defer unlock()
 		entries, err := os.ReadDir(p)
 		if err != nil {
-			if os.IsNotExist(err) {
+			switch {
+			case os.IsNotExist(err):
 				http.Error(w, "not found: "+p, http.StatusNotFound)
-			} else {
+			case errors.Is(err, syscall.ENOTDIR):
+				http.Error(w, "not a directory: "+p, http.StatusBadRequest)
+			default:
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
@@ -96,12 +94,10 @@ func DirPutHandler() http.HandlerFunc {
 			}
 			uid, gid = u, g
 		}
-		p, err := resolveFilePath(p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
 			return
 		}
-		unlock := lockPath(p)
 		defer unlock()
 		if err := os.MkdirAll(p, mode); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

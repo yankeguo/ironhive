@@ -35,7 +35,7 @@ func TestFilesGetAbsolute(t *testing.T) {
 	if string(body) != "hello" {
 		t.Fatalf("body = %q, want %q", body, "hello")
 	}
-	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename="hello.txt"` {
+	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename=hello.txt` {
 		t.Fatalf("Content-Disposition = %q", cd)
 	}
 }

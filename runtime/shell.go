@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // shellMu serializes shell executions: all invocations share the on-disk
@@ -55,7 +58,11 @@ unset __kv
 //
 //	event: stdout / stderr — data: <json string, one per output line>
 //	event: exit            — data: <exit code>
-//	event: error           — data: <json string> (spawn failures)
+//	event: error           — data: <json string> (spawn or stream failures)
+//
+// If the client disconnects, the command is terminated with SIGTERM (so
+// the wrapper's EXIT trap still saves the state snapshot) and killed
+// after a grace period.
 func ShellPostHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		command := r.PostFormValue("command")
@@ -79,7 +86,15 @@ func ShellPostHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		cmd := exec.Command("bash", "-c", buildShellWrapper(command))
+		cmd := exec.CommandContext(r.Context(), "bash", "-c", buildShellWrapper(command))
+		// SIGTERM (not the default SIGKILL) lets bash run the EXIT trap
+		// that persists the pwd/env snapshot.
+		cmd.Cancel = func() error {
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}
+		// After a cancel, kill the process if it ignores SIGTERM (e.g.
+		// `trap '' TERM`) for too long.
+		cmd.WaitDelay = 5 * time.Second
 		cmd.Env = append(os.Environ(),
 			"IHR_SHELL_STATE_ENV="+state.env,
 			"IHR_SHELL_STATE_PWD="+state.pwd,
@@ -106,8 +121,15 @@ func ShellPostHandler() http.HandlerFunc {
 		go scanSSE(stdout, "stdout", events, &wg)
 		go scanSSE(stderr, "stderr", events, &wg)
 		go func() {
+			// Wait runs concurrently with the readers on purpose: it
+			// closes the parent pipe ends as soon as the process exits,
+			// which unblocks the readers even when a backgrounded
+			// grandchild keeps its inherited pipe fds open. Output still
+			// in flight at that moment may be lost — the alternative
+			// (read-then-Wait) hangs forever on such grandchildren.
+			err := cmd.Wait()
 			wg.Wait()
-			events <- sseEvent{"exit", strconv.Itoa(exitCode(cmd.Wait()))}
+			events <- sseEvent{"exit", strconv.Itoa(exitCode(err))}
 			close(events)
 		}()
 		for ev := range events {
@@ -118,13 +140,20 @@ func ShellPostHandler() http.HandlerFunc {
 
 type sseEvent struct{ event, data string }
 
-// scanSSE forwards lines from rd as SSE events until EOF.
+// scanSSE forwards lines from rd as SSE events until EOF; scanner
+// failures (e.g. an overlong line) surface as error events, except the
+// pipe closures expected when WaitDelay or a cancel tears things down.
 func scanSSE(rd io.Reader, event string, ch chan<- sseEvent, wg *sync.WaitGroup) {
 	defer wg.Done()
 	sc := bufio.NewScanner(rd)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		ch <- sseEvent{event, sc.Text()}
+	}
+	if err := sc.Err(); err != nil &&
+		!errors.Is(err, io.ErrClosedPipe) &&
+		!errors.Is(err, fs.ErrClosed) {
+		ch <- sseEvent{"error", fmt.Sprintf("%s stream: %v", event, err)}
 	}
 }
 

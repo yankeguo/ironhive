@@ -70,8 +70,8 @@ func TestDirGetErrors(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, dirTarget(f, ""), nil)
 	rec = httptest.NewRecorder()
 	DirGetHandler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("not a directory: status = %d, want 500", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("not a directory: status = %d, want 400", rec.Code)
 	}
 }
 

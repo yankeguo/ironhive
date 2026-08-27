@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/user"
@@ -39,22 +40,32 @@ func lockPath(p string) func() {
 	return mu.Unlock
 }
 
+// requirePath extracts the "path" query parameter, resolves it to an
+// absolute path and locks it. On failure it writes the error response and
+// returns ok == false.
+func requirePath(w http.ResponseWriter, r *http.Request) (p string, unlock func(), ok bool) {
+	raw := r.URL.Query().Get("path")
+	if raw == "" {
+		http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+		return "", nil, false
+	}
+	p, err := resolveFilePath(raw)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return "", nil, false
+	}
+	return p, lockPath(p), true
+}
+
 // FilesGetHandler serves GET /v1/file?path=<file>: the file at path is
 // returned as an attachment. path may be absolute, or relative to the
 // process working directory.
 func FilesGetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("path")
-		if p == "" {
-			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
 			return
 		}
-		p, err := resolveFilePath(p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		unlock := lockPath(p)
 		defer unlock()
 		f, err := os.Open(p)
 		if err != nil {
@@ -75,7 +86,7 @@ func FilesGetHandler() http.HandlerFunc {
 			http.Error(w, "is a directory: "+p, http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", st.Name()))
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": st.Name()}))
 		http.ServeContent(w, r, st.Name(), st.ModTime(), f)
 	}
 }
@@ -115,12 +126,10 @@ func FilesPutHandler() http.HandlerFunc {
 			}
 			uid, gid = u, g
 		}
-		p, err := resolveFilePath(p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
 			return
 		}
-		unlock := lockPath(p)
 		defer unlock()
 		// Write to a temp file in the same directory (same filesystem, so
 		// the rename below is atomic), then rename it over the target.
@@ -153,6 +162,13 @@ func FilesPutHandler() http.HandlerFunc {
 		if err := f.Chmod(mode); err != nil {
 			f.Close()
 			http.Error(w, "chmod: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Flush to disk before the rename, so a crash cannot leave the
+		// target renamed to a file whose content was never persisted.
+		if err := f.Sync(); err != nil {
+			f.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if err := f.Close(); err != nil {
