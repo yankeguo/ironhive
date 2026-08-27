@@ -22,7 +22,7 @@ Retro on the server, modern in the build:
 | `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
 | `controller/web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
 | `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
-| `runtime/` | Runtime package: agent logic for managed containers |
+| `runtime/` | Runtime package: agent logic for managed containers, PID 1 zombie reaping |
 
 ## Develop
 

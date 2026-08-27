@@ -6,11 +6,10 @@ RUN go build -trimpath -ldflags="-s -w" -o /ironhive-runtime ./cmd/ironhive-runt
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	tini \
 	ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 COPY --from=builder /ironhive-runtime /ironhive-runtime
 ENV IRONHIVE_LISTEN=:8080
 EXPOSE 8080
-ENTRYPOINT ["tini", "--"]
-CMD ["/ironhive-runtime"]
+# ironhive-runtime acts as PID 1 itself (zombie reaping), no tini needed.
+ENTRYPOINT ["/ironhive-runtime"]
