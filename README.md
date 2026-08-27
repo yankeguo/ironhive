@@ -38,6 +38,8 @@ As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so t
 | `GET /v1/file?path=` | Download a file as an attachment (`Range` supported). `path` may be absolute, or relative to the process working directory |
 | `PUT /v1/file?path=` | Upload a file **atomically**: the body lands in a temp file in the target directory, then is renamed over the target. Optional `chmod` (zero-prefixed octal, e.g. `0644`) and `chown` (`user:group`; names or numeric ids, either side omittable, e.g. `user`, `:group`, `1000:1000`) |
 | `PUT /v1/tar?path=` | Extract an uncompressed tar stream into `path` (created if missing). Regular files and directories with preserved modes and mtimes; absolute entry names, `..` traversal and other entry types are rejected |
+| `GET /v1/dir?path=` | List a directory as a JSON array of `{name, dir, size, mode, mtime}`, sorted by name (`mode` is zero-prefixed octal, `mtime` RFC3339) |
+| `PUT /v1/dir?path=` | Create a directory like `mkdir -p`. Optional `chmod` / `chown`, same syntax as `PUT /v1/file` (default mode `0755`) |
 | `POST /v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below) |
 
 File operations on the same absolute path are serialized with a per-path mutex.
