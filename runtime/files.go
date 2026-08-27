@@ -9,19 +9,34 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// resolveFilePath returns p as an absolute path, resolving relative paths
-// against the process working directory.
+// resolveFilePath returns p as an absolute, cleaned path, resolving
+// relative paths against the process working directory.
 func resolveFilePath(p string) (string, error) {
 	if filepath.IsAbs(p) {
-		return p, nil
+		return filepath.Clean(p), nil
 	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(wd, p), nil
+}
+
+// fileLocks holds one mutex per absolute path, serializing GET/PUT (and
+// future) operations on the same file so concurrent requests cannot
+// interleave. Entries are never evicted — paths handled by this agent are
+// expected to be bounded.
+var fileLocks sync.Map // map[string]*sync.Mutex
+
+// lockPath locks the per-path mutex for p and returns the unlock function.
+func lockPath(p string) func() {
+	m, _ := fileLocks.LoadOrStore(p, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // FilesGetHandler serves GET /v1/file?path=<file>: the file at path is
@@ -39,6 +54,8 @@ func FilesGetHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		unlock := lockPath(p)
+		defer unlock()
 		f, err := os.Open(p)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -103,6 +120,8 @@ func FilesPutHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		unlock := lockPath(p)
+		defer unlock()
 		// Write to a temp file in the same directory (same filesystem, so
 		// the rename below is atomic), then rename it over the target.
 		f, err := os.CreateTemp(filepath.Dir(p), ".ironhive-upload-*")

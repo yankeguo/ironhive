@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -189,4 +191,34 @@ func TestFilesPutAtomic(t *testing.T) {
 		}
 		t.Fatalf("unexpected files in dir: %v", names)
 	}
+}
+
+func TestFilesConcurrentSamePath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "shared.txt")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf("value-%02d", i)
+			for j := 0; j < 20; j++ {
+				if rec := put(t, putTarget(p, ""), body); rec.Code != http.StatusOK {
+					t.Errorf("put: status = %d (%s)", rec.Code, rec.Body)
+					return
+				}
+				rec := get(t, p)
+				if rec.Code != http.StatusOK {
+					t.Errorf("get: status = %d", rec.Code)
+					return
+				}
+				b, _ := io.ReadAll(rec.Body)
+				if s := string(b); !strings.HasPrefix(s, "value-") || len(s) != len(body) {
+					t.Errorf("partial or corrupt read: %q", s)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }
