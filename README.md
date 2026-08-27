@@ -24,6 +24,43 @@ Retro on the server, modern in the build:
 | `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
 | `runtime/` | Runtime package: agent logic for managed containers, PID 1 zombie reaping |
 
+## ironhive-runtime
+
+`ironhive-runtime` is the agent running as the main process inside managed containers. Flags: `-listen` / `IHR_LISTEN` (default `:8080`).
+
+As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so the image needs no tini — `Dockerfile.runtime` uses the binary directly as `ENTRYPOINT`.
+
+### API
+
+| Endpoint | Description |
+|---|---|
+| `GET /healthz` | Liveness probe, returns `OK` |
+| `GET /v1/file?path=` | Download a file as an attachment (`Range` supported). `path` may be absolute, or relative to the process working directory |
+| `PUT /v1/file?path=` | Upload a file **atomically**: the body lands in a temp file in the target directory, then is renamed over the target. Optional `chmod` (zero-prefixed octal, e.g. `0644`) and `chown` (`user:group`; names or numeric ids, either side omittable, e.g. `user`, `:group`, `1000:1000`) |
+| `PUT /v1/tar?path=` | Extract an uncompressed tar stream into `path` (created if missing). Regular files and directories with preserved modes and mtimes; absolute entry names, `..` traversal and other entry types are rejected |
+| `POST /v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below) |
+
+File operations on the same absolute path are serialized with a per-path mutex.
+
+### Shell sessions
+
+`POST /v1/shell` runs each command embedded in a bash wrapper that restores the previous call's environment and working directory from on-disk snapshots (`$TMPDIR/ironhive-shell/{env,pwd}`) and saves them again on exit via `trap` — so `cd` and `export` carry over between calls without a long-lived shell. The initial working directory is the process cwd. Calls are serialized because they share the state files.
+
+The response is `text/event-stream`; `data` is a JSON-encoded string:
+
+```
+event: stdout
+data: "hello"
+
+event: stderr
+data: "something failed"
+
+event: exit
+data: "0"
+```
+
+One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code.
+
 ## Develop
 
 ```bash
