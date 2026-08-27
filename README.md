@@ -1,4 +1,4 @@
-# retrogo
+# ironhive
 
 A GitHub template that bundles multiple TypeScript entrypoints and Tailwind CSS with Bun, then serves the hashed assets through classic Go `html/template` and `net/http`.
 
@@ -13,7 +13,7 @@ Retro on the server, modern in the build:
 
 | Path | Role |
 |---|---|
-| `main.go` | Flags (`-listen` / `RETROGO_LISTEN`, default `:8080`), graceful shutdown |
+| `main.go` | Flags (`-listen` / `IRONHIVE_LISTEN`, default `:8080`), graceful shutdown |
 | `server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
 | `web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
 | `web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |

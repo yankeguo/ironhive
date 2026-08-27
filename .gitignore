@@ -7,7 +7,7 @@
 *.dll
 *.so
 *.dylib
-/retrogo
+/ironhive
 
 # Test binary, built with `go test -c`
 *.test

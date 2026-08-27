@@ -1,5 +1,5 @@
 {
-  "name": "retrogo-static",
+  "name": "ironhive-static",
   "private": true,
   "scripts": {
     "build": "bun run build.ts",
