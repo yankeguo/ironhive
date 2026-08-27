@@ -1,0 +1,8 @@
+.git
+.github
+.gitignore
+*.md
+*_test.go
+LICENSE
+web/node_modules
+web/dist

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>retrogo</title>
+  {{template "head" .}}
+  <script src="{{jsAsset "home"}}" defer></script>
+</head>
+<body>
+  {{template "nav" .}}
+  <main class="mx-auto max-w-screen-xl px-4 py-6">
+    <div class="card">
+      <div class="card-header">Home</div>
+      <div class="card-body">
+        <p>Served by std <code>net/http</code>, rendered with <code>html/template</code> at {{.Time}}.</p>
+        <p class="mt-4">
+          <button id="counter" type="button" class="btn btn-primary">
+            <span class="icon-[lucide--mouse-pointer-click]"></span> Clicked <span id="count">0</span> times
+          </button>
+        </p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

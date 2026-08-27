@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>About - retrogo</title>
+  {{template "head" .}}
+  <script src="{{jsAsset "about"}}" defer></script>
+</head>
+<body>
+  {{template "nav" .}}
+  <main class="mx-auto max-w-screen-xl px-4 py-6">
+    <div class="card">
+      <div class="card-header">About</div>
+      <div class="card-body">
+        <p>retrogo: retro <code>html/template</code> views, modern Bun + TypeScript + Tailwind v4 build.</p>
+        <p class="mt-2 text-neutral-400">Each page loads its own hashed, immutable <code>&lt;entry&gt;-&lt;hash&gt;.js</code> bundle.</p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
