@@ -28,6 +28,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /v1/file", runtime.FilesGetHandler())
 	mux.HandleFunc("PUT /v1/file", runtime.FilesPutHandler())
+	mux.HandleFunc("PUT /v1/tar", runtime.TarPutHandler())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
