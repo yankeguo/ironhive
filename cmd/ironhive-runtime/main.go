@@ -27,6 +27,7 @@ func main() {
 		_, _ = w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("GET /v1/file", runtime.FilesGetHandler())
+	mux.HandleFunc("PUT /v1/file", runtime.FilesPutHandler())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

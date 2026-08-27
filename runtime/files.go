@@ -2,10 +2,27 @@ package runtime
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
+
+// resolveFilePath returns p as an absolute path, resolving relative paths
+// against the process working directory.
+func resolveFilePath(p string) (string, error) {
+	if filepath.IsAbs(p) {
+		return p, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(wd, p), nil
+}
 
 // FilesGetHandler serves GET /v1/file?path=<file>: the file at path is
 // returned as an attachment. path may be absolute, or relative to the
@@ -17,13 +34,10 @@ func FilesGetHandler() http.HandlerFunc {
 			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
 			return
 		}
-		if !filepath.IsAbs(p) {
-			wd, err := os.Getwd()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			p = filepath.Join(wd, p)
+		p, err := resolveFilePath(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 		f, err := os.Open(p)
 		if err != nil {
@@ -47,4 +61,143 @@ func FilesGetHandler() http.HandlerFunc {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", st.Name()))
 		http.ServeContent(w, r, st.Name(), st.ModTime(), f)
 	}
+}
+
+// FilesPutHandler serves PUT /v1/file?path=<file>: the request body is
+// written to path atomically — the body lands in a temporary file in the
+// same directory, which is then renamed over path, so concurrent readers
+// never see a partial file. Optional query parameters:
+//
+//	chmod — file mode as zero-prefixed octal, e.g. "0644" (default "0644")
+//	chown — owner as "user:group"; either side may be a name or a numeric
+//	        id, and either side may be omitted ("user", ":group", "1000:1000")
+func FilesPutHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		p := q.Get("path")
+		if p == "" {
+			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+			return
+		}
+		// Validate options before touching the filesystem.
+		mode := os.FileMode(0o644)
+		if s := q.Get("chmod"); s != "" {
+			m, err := parseChmod(s)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mode = m
+		}
+		uid, gid := -1, -1
+		if s := q.Get("chown"); s != "" {
+			u, g, err := parseChown(s)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			uid, gid = u, g
+		}
+		p, err := resolveFilePath(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Write to a temp file in the same directory (same filesystem, so
+		// the rename below is atomic), then rename it over the target.
+		f, err := os.CreateTemp(filepath.Dir(p), ".ironhive-upload-*")
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "not found: "+p, http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		tmpName := f.Name()
+		// No-op after a successful rename; removes the temp file on any
+		// failure path below.
+		defer os.Remove(tmpName)
+		if _, err := io.Copy(f, r.Body); err != nil {
+			f.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// chown first: it may clear setuid/setgid bits set by chmod.
+		if uid >= 0 || gid >= 0 {
+			if err := f.Chown(uid, gid); err != nil {
+				f.Close()
+				http.Error(w, "chown: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := f.Chmod(mode); err != nil {
+			f.Close()
+			http.Error(w, "chmod: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := f.Close(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := os.Rename(tmpName, p); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("OK"))
+	}
+}
+
+// parseChmod parses a zero-prefixed octal file mode, e.g. "0644".
+func parseChmod(s string) (os.FileMode, error) {
+	if !strings.HasPrefix(s, "0") {
+		return 0, fmt.Errorf("invalid chmod %q: must be zero-prefixed octal", s)
+	}
+	n, err := strconv.ParseUint(s, 8, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid chmod %q: %v", s, err)
+	}
+	return os.FileMode(n), nil
+}
+
+// parseChown parses "user:group" into numeric ids; either side may be a
+// name or a numeric id, and may be omitted (-1 = leave unchanged).
+func parseChown(s string) (uid, gid int, err error) {
+	u, g, _ := strings.Cut(s, ":")
+	if uid, err = resolveUserID(u); err != nil {
+		return -1, -1, err
+	}
+	if gid, err = resolveGroupID(g); err != nil {
+		return -1, -1, err
+	}
+	return uid, gid, nil
+}
+
+func resolveUserID(s string) (int, error) {
+	if s == "" {
+		return -1, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, nil
+	}
+	u, err := user.Lookup(s)
+	if err != nil {
+		return -1, fmt.Errorf("invalid chown user %q: %v", s, err)
+	}
+	return strconv.Atoi(u.Uid)
+}
+
+func resolveGroupID(s string) (int, error) {
+	if s == "" {
+		return -1, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, nil
+	}
+	g, err := user.LookupGroup(s)
+	if err != nil {
+		return -1, fmt.Errorf("invalid chown group %q: %v", s, err)
+	}
+	return strconv.Atoi(g.Gid)
 }
