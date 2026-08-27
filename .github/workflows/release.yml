@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [controller, runtime]
     permissions:
       contents: read
       packages: write
@@ -32,16 +35,17 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=latest-,enable={{is_default_branch}}
-            type=ref,event=tag
+            type=raw,value=${{ matrix.component }}-latest,enable={{is_default_branch}}
+            type=sha,prefix=${{ matrix.component }}-latest-,enable={{is_default_branch}}
+            type=ref,event=tag,prefix=${{ matrix.component }}-
 
       - name: docker-build-and-push
         uses: docker/build-push-action@v6
         with:
           context: .
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: Dockerfile.${{ matrix.component }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
           pull: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}

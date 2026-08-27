@@ -13,46 +13,49 @@ Retro on the server, modern in the build:
 
 | Path | Role |
 |---|---|
-| `main.go` | Flags (`-listen` / `IRONHIVE_LISTEN`, default `:8080`), graceful shutdown |
-| `server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
-| `web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
-| `web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
-| `web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
-| `web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
-| `web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
+| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IRONHIVE_LISTEN`, default `:8080`), graceful shutdown |
+| `cmd/ironhive-runtime/` | Runtime binary: agent running inside managed containers |
+| `controller/` | Controller package: HTTP server, views, static assets |
+| `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
+| `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
+| `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
+| `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
+| `controller/web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
+| `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
+| `runtime/` | Runtime package: agent logic for managed containers |
 
 ## Develop
 
 ```bash
 # terminal 1: rebuild bundles on change (unminified, inline sourcemaps)
-(cd web && bun install && bun run dev)
+(cd controller/web && bun install && bun run dev)
 
-# terminal 2: run the server
-go run .
+# terminal 2: run the controller
+go run ./cmd/ironhive-controller
 ```
 
 ## Build
 
 ```bash
-(cd web && bun run typecheck && bun run build)
+(cd controller/web && bun run typecheck && bun run build)
 go test ./...
-go build .
+go build ./cmd/ironhive-controller ./cmd/ironhive-runtime
 ```
 
-`web/dist` is git-ignored (only `.gitkeep` is committed), so always run the frontend build before `go build` — in Docker, do it in an `oven/bun` stage.
+`controller/web/dist` is git-ignored (only `.gitkeep` is committed), so always run the frontend build before `go build` — in Docker, do it in an `oven/bun` stage.
 
 ## Release
 
-`.github/workflows/release.yml` builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile` (`oven/bun` stage for the frontend, `golang` stage for the binary):
+`.github/workflows/release.yml` builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile.controller` and `Dockerfile.runtime`, with tags prefixed by component:
 
-- push `main` → `latest` and `latest-<short_sha>`
-- push a git tag → that tag
+- push `main` → `controller-latest` / `runtime-latest` and `controller-latest-<short_sha>` / `runtime-latest-<short_sha>`
+- push a git tag → `controller-<tag>` / `runtime-<tag>`
 
-Note: the bun stage mirrors the repo layout (`WORKDIR /repo/web`, `COPY *.go /repo/`) because `main.css`'s Tailwind `@source "../../../*.go"` resolves relative to the CSS file — without the Go files next to `web/`, the glob lands on the container root and the build hangs scanning the whole filesystem.
+Note: the bun stage mirrors the repo layout (`WORKDIR /repo/controller/web`, `COPY controller/*.go /repo/controller/`) because `main.css`'s Tailwind `@source "../../../*.go"` resolves relative to the CSS file — without the Go files next to `web/`, the glob lands on the container root and the build hangs scanning the whole filesystem.
 
 ## Adding a page
 
-1. Add a route in `server.go`, e.g. `mux.HandleFunc("GET /about", s.handleAbout)`.
-2. Add a view `web/view/about.html` with `{{template "head" .}}` and `<script src="{{jsAsset "about"}}" defer></script>`.
-3. Add an entry `web/src/entries/about.ts`.
+1. Add a route in `controller/server.go`, e.g. `mux.HandleFunc("GET /about", s.handleAbout)`.
+2. Add a view `controller/web/view/about.html` with `{{template "head" .}}` and `<script src="{{jsAsset "about"}}" defer></script>`.
+3. Add an entry `controller/web/src/entries/about.ts`.
 4. `bun run build` — the new `about-<hash>.js` is picked up automatically.

@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/yankeguo/ironhive/controller"
 )
 
 func main() {
@@ -22,7 +24,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           NewServer().Handler(),
+		Handler:           controller.NewServer().Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

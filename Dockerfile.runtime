@@ -1,0 +1,14 @@
+FROM golang:1.27 AS builder
+ENV CGO_ENABLED=0
+WORKDIR /go/src/app
+COPY . .
+RUN go build -trimpath -ldflags="-s -w" -o /ironhive-runtime ./cmd/ironhive-runtime
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	tini \
+	ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+COPY --from=builder /ironhive-runtime /ironhive-runtime
+ENTRYPOINT ["tini", "--"]
+CMD ["/ironhive-runtime"]
