@@ -12,7 +12,7 @@ import (
 
 func get(t *testing.T, path string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/v1/files/get?path="+url.QueryEscape(path), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/file?path="+url.QueryEscape(path), nil)
 	rec := httptest.NewRecorder()
 	FilesGetHandler().ServeHTTP(rec, req)
 	return rec

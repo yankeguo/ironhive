@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-// FilesGetHandler serves GET /v1/files/get?path=<file>: the file at path is
+// FilesGetHandler serves GET /v1/file?path=<file>: the file at path is
 // returned as an attachment. path may be absolute, or relative to the
 // process working directory.
 func FilesGetHandler() http.HandlerFunc {
