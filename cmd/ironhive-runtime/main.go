@@ -17,7 +17,7 @@ import (
 func main() {
 	runtime.ReapZombies()
 
-	listen := envOr("IHR_LISTEN", ":8080")
+	listen := envOr("IHR_LISTEN", ":19173")
 	flag.StringVar(&listen, "listen", listen, "http listen address")
 	flag.Parse()
 

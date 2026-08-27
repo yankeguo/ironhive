@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 COPY --from=builder /ironhive-runtime /ironhive-runtime
-ENV IHR_LISTEN=:8080
-EXPOSE 8080
+ENV IHR_LISTEN=:19173
+EXPOSE 19173
 # ironhive-runtime acts as PID 1 itself (zombie reaping), no tini needed.
 ENTRYPOINT ["/ironhive-runtime"]

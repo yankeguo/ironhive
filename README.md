@@ -26,7 +26,7 @@ Retro on the server, modern in the build:
 
 ## ironhive-runtime
 
-`ironhive-runtime` is the agent running as the main process inside managed containers. Flags: `-listen` / `IHR_LISTEN` (default `:8080`).
+`ironhive-runtime` is the agent running as the main process inside managed containers. Flags: `-listen` / `IHR_LISTEN` (default `:19173`).
 
 As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so the image needs no tini — `Dockerfile.runtime` uses the binary directly as `ENTRYPOINT`.
 
