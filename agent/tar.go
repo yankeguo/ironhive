@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -155,9 +156,11 @@ func TarGetHandler() http.HandlerFunc {
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment",
 			map[string]string{"filename": st.Name() + ".tar"}))
 		// The status is already sent, so a mid-stream failure can only
-		// truncate the response.
+		// truncate the response; log it for server-side visibility.
 		tw := tar.NewWriter(w)
-		_ = writeDirToTar(tw, p, filter)
+		if err := writeDirToTar(tw, p, filter); err != nil {
+			log.Printf("GET /v1/tar: %s: stream aborted: %v", p, err)
+		}
 		_ = tw.Close()
 	}
 }
@@ -360,6 +363,11 @@ func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 			if err := os.MkdirAll(target, tarPerm(hdr, 0o755)); err != nil {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
 			}
+			// MkdirAll leaves existing directories untouched and applies
+			// umask to new ones, so restore the archive mode explicitly.
+			if err := os.Chmod(target, tarPerm(hdr, 0o755)); err != nil {
+				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
+			}
 		case tar.TypeReg, tar.TypeRegA:
 			if !filter.included(hdr.Name) {
 				continue
@@ -399,6 +407,11 @@ func writeTarEntry(tr *tar.Reader, target string, hdr *tar.Header) error {
 		return err
 	}
 	if err := f.Close(); err != nil {
+		return err
+	}
+	// The OpenFile mode is subject to umask and ignored when the file
+	// already exists, so restore the archive mode explicitly.
+	if err := os.Chmod(target, tarPerm(hdr, 0o644)); err != nil {
 		return err
 	}
 	if !hdr.ModTime.IsZero() {

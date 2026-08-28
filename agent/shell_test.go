@@ -2,12 +2,14 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 type capturedEvent struct{ event, data string }
@@ -111,5 +113,27 @@ func TestShellMissingCommand(t *testing.T) {
 	ShellPostHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestShellCancelTerminatesCommand(t *testing.T) {
+	form := url.Values{"command": {"sleep 60"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/shell", strings.NewReader(form.Encode())).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		ShellPostHandler().ServeHTTP(rec, req)
+		close(done)
+	}()
+	// Let the command start, then cancel the request; the handler should
+	// tear the command down and return promptly.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after request cancel")
 	}
 }

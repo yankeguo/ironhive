@@ -87,13 +87,23 @@ func ShellPostHandler() http.HandlerFunc {
 			return
 		}
 		cmd := exec.CommandContext(r.Context(), "bash", "-c", buildShellWrapper(command))
-		// SIGTERM (not the default SIGKILL) lets bash run the EXIT trap
-		// that persists the pwd/env snapshot.
+		// Run bash in its own process group so a cancel can SIGTERM the
+		// whole tree (pipelines, subshells, `sleep`s), not just the bash
+		// wrapper. SIGTERM (not the default SIGKILL) lets bash run the
+		// EXIT trap that persists the pwd/env snapshot.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
-			return cmd.Process.Signal(syscall.SIGTERM)
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			if err == syscall.ESRCH {
+				// The group is already gone; nothing to cancel.
+				return nil
+			}
+			return err
 		}
 		// After a cancel, kill the process if it ignores SIGTERM (e.g.
-		// `trap '' TERM`) for too long.
+		// `trap '' TERM`) for too long. Grandchildren ignoring SIGTERM
+		// outlive this, but are reparented to PID 1 and reaped when they
+		// eventually die.
 		cmd.WaitDelay = 5 * time.Second
 		cmd.Env = append(os.Environ(),
 			"IHR_SHELL_STATE_ENV="+state.env,

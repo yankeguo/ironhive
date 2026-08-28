@@ -45,6 +45,11 @@ func DirGetHandler() http.HandlerFunc {
 		for _, e := range entries {
 			info, err := e.Info()
 			if err != nil {
+				// The entry vanished between ReadDir and Info; a live
+				// directory can race with other processes.
+				if os.IsNotExist(err) {
+					continue
+				}
 				writeError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -70,35 +75,15 @@ func DirGetHandler() http.HandlerFunc {
 //	        may be omitted
 func DirPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		p := q.Get("path")
-		if p == "" {
-			writeError(w, "missing query parameter: path", http.StatusBadRequest)
-			return
-		}
-		mode := os.FileMode(0o755)
-		if s := q.Get("chmod"); s != "" {
-			m, err := parseChmod(s)
-			if err != nil {
-				writeError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			mode = m
-		}
-		uid, gid := -1, -1
-		if s := q.Get("chown"); s != "" {
-			u, g, err := parseChown(s)
-			if err != nil {
-				writeError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			uid, gid = u, g
-		}
 		p, unlock, ok := requirePath(w, r)
 		if !ok {
 			return
 		}
 		defer unlock()
+		mode, uid, gid, ok := parsePermOptions(w, r.URL.Query(), 0o755)
+		if !ok {
+			return
+		}
 		if err := os.MkdirAll(p, mode); err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 			return

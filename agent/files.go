@@ -121,30 +121,16 @@ func FilesGetHandler() http.HandlerFunc {
 //	        id, and either side may be omitted ("user", ":group", "1000:1000")
 func FilesPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		p := q.Get("path")
-		if p == "" {
-			writeError(w, "missing query parameter: path", http.StatusBadRequest)
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
 			return
 		}
+		defer unlock()
 		// Validate options before touching the filesystem.
-		mode := os.FileMode(0o644)
-		if s := q.Get("chmod"); s != "" {
-			m, err := parseChmod(s)
-			if err != nil {
-				writeError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			mode = m
-		}
-		uid, gid := -1, -1
-		if s := q.Get("chown"); s != "" {
-			u, g, err := parseChown(s)
-			if err != nil {
-				writeError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			uid, gid = u, g
+		q := r.URL.Query()
+		mode, uid, gid, ok := parsePermOptions(w, q, 0o644)
+		if !ok {
+			return
 		}
 		rawURL := q.Get("url")
 		if rawURL != "" {
@@ -153,11 +139,6 @@ func FilesPutHandler() http.HandlerFunc {
 				return
 			}
 		}
-		p, unlock, ok := requirePath(w, r)
-		if !ok {
-			return
-		}
-		defer unlock()
 		// The content source is the request body, unless url is given.
 		src, ok := putSource(w, r, rawURL)
 		if !ok {
@@ -367,12 +348,39 @@ func FilesUploadHandler() http.HandlerFunc {
 	}
 }
 
-// parseChmod parses a zero-prefixed octal file mode, e.g. "0644".
+// parsePermOptions validates the chmod and chown query parameters shared by
+// the PUT endpoints, defaulting the mode to defMode. On failure it writes
+// the error response and returns ok == false.
+func parsePermOptions(w http.ResponseWriter, q url.Values, defMode os.FileMode) (mode os.FileMode, uid, gid int, ok bool) {
+	mode = defMode
+	if s := q.Get("chmod"); s != "" {
+		m, err := parseChmod(s)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return 0, 0, 0, false
+		}
+		mode = m
+	}
+	uid, gid = -1, -1
+	if s := q.Get("chown"); s != "" {
+		u, g, err := parseChown(s)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return 0, 0, 0, false
+		}
+		uid, gid = u, g
+	}
+	return mode, uid, gid, true
+}
+
+// parseChmod parses a zero-prefixed octal file mode, e.g. "0644". Values
+// are capped at 07777 (permission bits plus setuid/setgid/sticky): wider
+// octal values would spill into os.FileMode's non-permission flag bits.
 func parseChmod(s string) (os.FileMode, error) {
 	if !strings.HasPrefix(s, "0") {
 		return 0, fmt.Errorf("invalid chmod %q: must be zero-prefixed octal", s)
 	}
-	n, err := strconv.ParseUint(s, 8, 32)
+	n, err := strconv.ParseUint(s, 8, 12)
 	if err != nil {
 		return 0, fmt.Errorf("invalid chmod %q: %v", s, err)
 	}
