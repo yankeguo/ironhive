@@ -8,9 +8,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 var podNamePattern = regexp.MustCompile(`^sandbox-[0-9a-z]{26}$`)
@@ -240,6 +244,30 @@ func TestAllocateUnknownPool(t *testing.T) {
 	}
 }
 
+func TestAllocateFailsFastOnAPIError(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+
+	// A broken patch API (RBAC, apiserver failure) is not a lost race:
+	// Allocate surfaces the error immediately instead of burning the wait
+	// window and masking it as ErrNoSandboxAvailable.
+	kube.Fake.PrependReactor("patch", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Resource: "pods"}, "sandbox-x", errors.New("denied"))
+	})
+	start := time.Now()
+	if _, err := m.Allocate(ctx, "default", time.Minute, 30*time.Second); !apierrors.IsForbidden(err) {
+		t.Fatalf("want the forbidden error, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("allocate took %v, want fail-fast", elapsed)
+	}
+}
+
 func TestAllocateWaitsForReady(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
@@ -371,6 +399,27 @@ func TestRenewExtendsLease(t *testing.T) {
 	}
 	if _, err := m2.Renew(ctx, "sandbox-nope", time.Hour); !errors.Is(err, ErrSandboxNotFound) {
 		t.Errorf("renew unknown: want ErrSandboxNotFound, got %v", err)
+	}
+}
+
+func TestRenewDeletedPodIsNotFound(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	st, err := m.Allocate(ctx, "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The pod is deleted out of band between the allocation and the renew.
+	kube.Fake.PrependReactor("patch", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, st.Name)
+	})
+	if _, err := m.Renew(ctx, st.Name, time.Hour); !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("want ErrSandboxNotFound, got %v", err)
 	}
 }
 

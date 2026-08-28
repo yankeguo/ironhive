@@ -120,4 +120,9 @@ func TestLoadConfigErrors(t *testing.T) {
 	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "port") {
 		t.Fatalf("bad port: err = %v", err)
 	}
+	// A pool name that is not a valid label value.
+	p = writeConfig(t, "pools:\n  'bad name': {}\n")
+	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("bad pool name: err = %v", err)
+	}
 }

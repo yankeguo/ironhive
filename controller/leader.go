@@ -50,6 +50,7 @@ func (m *PodManager) RunLeaderElection(ctx context.Context) {
 	// Leader changes are recorded as Events on the Lease object —
 	// kubectl describe lease ironhive-controller shows the history.
 	broadcaster := record.NewBroadcaster()
+	defer broadcaster.Shutdown()
 	broadcaster.StartRecordingToSink(&corev1client.EventSinkImpl{
 		Interface: m.kube.CoreV1().Events(m.namespace),
 	})

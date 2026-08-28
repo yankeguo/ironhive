@@ -3,8 +3,10 @@ package controller
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
 
@@ -125,6 +127,12 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	for name, p := range c.Pools {
+		// The pool name lands in the ironhive.dev/pool label of every pod,
+		// so it must be a valid label value — otherwise pod creation fails
+		// at runtime with a far less obvious error.
+		if errs := validation.IsValidLabelValue(name); len(errs) > 0 {
+			return fmt.Errorf("pool %q: invalid name: %s", name, strings.Join(errs, "; "))
+		}
 		if p.Standby.Static.Count < 0 {
 			return fmt.Errorf("pool %q: standby.static.count must be >= 0", name)
 		}

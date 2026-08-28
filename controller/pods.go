@@ -15,6 +15,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -79,7 +80,6 @@ type PodState struct {
 	// optimistic-concurrency precondition when claiming the pod.
 	ResourceVersion string
 	CreatedAt       time.Time
-	UpdatedAt       time.Time
 }
 
 // PodManager keeps each pool's standby pods created and tracks all managed
@@ -262,25 +262,20 @@ func (m *PodManager) reconcile(ctx context.Context) {
 	}
 	m.mu.RUnlock()
 
-	for _, name := range terminated {
-		if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-			log.Println("pod manager: delete terminated pod", name, ":", err)
-		} else {
-			log.Println("pod manager: deleted terminated pod", name)
-		}
-	}
-	for _, name := range expired {
-		if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-			log.Println("pod manager: delete expired-lease pod", name, ":", err)
-		} else {
-			log.Println("pod manager: deleted pod", name, "with expired lease")
-		}
-	}
-	for _, name := range stale {
-		if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-			log.Println("pod manager: delete stale-template pod", name, ":", err)
-		} else {
-			log.Println("pod manager: deleted pod", name, "with stale template")
+	for _, sweep := range []struct {
+		reason string
+		names  []string
+	}{
+		{"terminated", terminated},
+		{"expired-lease", expired},
+		{"stale-template", stale},
+	} {
+		for _, name := range sweep.names {
+			if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+				log.Println("pod manager: delete", sweep.reason, "pod", name, ":", err)
+			} else {
+				log.Println("pod manager: deleted", sweep.reason, "pod", name)
+			}
 		}
 	}
 
@@ -353,7 +348,6 @@ func podStateFrom(pod *corev1.Pod) *PodState {
 		TemplateHash:    pod.Labels[LabelTemplateHash],
 		ResourceVersion: pod.ResourceVersion,
 		CreatedAt:       pod.CreationTimestamp.Time,
-		UpdatedAt:       time.Now(),
 	}
 }
 
@@ -392,7 +386,13 @@ func (m *PodManager) Allocate(ctx context.Context, poolName string, lease, wait 
 			if ctx.Err() != nil {
 				return PodState{}, ctx.Err()
 			}
-			// Lost the race or a transient error — try the next one.
+			// Lost the race (conflict) or the pod vanished underneath us —
+			// try the next candidate. Anything else means the API itself is
+			// failing; report it instead of burning the whole wait window
+			// and masking it as ErrNoSandboxAvailable.
+			if !apierrors.IsConflict(err) && !errors.Is(err, ErrSandboxNotFound) {
+				return PodState{}, err
+			}
 		}
 		if time.Now().After(deadline) {
 			return PodState{}, fmt.Errorf("pool %q: %w", poolName, ErrNoSandboxAvailable)
@@ -424,24 +424,38 @@ func (m *PodManager) claim(ctx context.Context, st PodState, lease time.Duration
 		st.ResourceVersion,
 		AnnotationAllocated, now.Format(time.RFC3339),
 		AnnotationLeaseExpires, now.Add(lease).Format(time.RFC3339))
-	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, st.Name,
-		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	claimed, err := m.patchPod(ctx, st.Name, patch)
 	if err != nil {
 		return PodState{}, err
 	}
-	claimed := podStateFrom(pod)
-	m.mu.Lock()
-	// The patch only touches metadata, so keep the freshest known runtime
-	// fields — the watch overwrites them with the server's truth anyway.
-	if prev, ok := m.pods[pod.Name]; ok {
-		claimed.IP = prev.IP
-		claimed.Phase = prev.Phase
-		claimed.Ready = prev.Ready
+	log.Println("pod manager: allocated pod", claimed.Name, "of pool", st.Pool)
+	return claimed, nil
+}
+
+// patchPod applies a metadata merge patch to one pod and mirrors the
+// result into the in-memory state. The patch only touches metadata, so the
+// freshest known runtime fields are kept — the watch overwrites them with
+// the server's truth anyway. A pod deleted concurrently surfaces as
+// ErrSandboxNotFound.
+func (m *PodManager) patchPod(ctx context.Context, name, patch string) (PodState, error) {
+	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, name,
+		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
+		}
+		return PodState{}, fmt.Errorf("patch pod %q: %w", name, err)
 	}
-	m.pods[pod.Name] = claimed
+	next := podStateFrom(pod)
+	m.mu.Lock()
+	if prev, ok := m.pods[pod.Name]; ok {
+		next.IP = prev.IP
+		next.Phase = prev.Phase
+		next.Ready = prev.Ready
+	}
+	m.pods[pod.Name] = next
 	m.mu.Unlock()
-	log.Println("pod manager: allocated pod", pod.Name, "of pool", st.Pool)
-	return *claimed, nil
+	return *next, nil
 }
 
 // Renew extends the lease of an allocated pod to lease from now and
@@ -460,21 +474,7 @@ func (m *PodManager) Renew(ctx context.Context, name string, lease time.Duration
 	// forward, so last write wins is fine.
 	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`,
 		AnnotationLeaseExpires, time.Now().UTC().Add(lease).Format(time.RFC3339))
-	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, name,
-		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	if err != nil {
-		return PodState{}, fmt.Errorf("patch pod %q: %w", name, err)
-	}
-	renewed := podStateFrom(pod)
-	m.mu.Lock()
-	if prev, ok := m.pods[pod.Name]; ok {
-		renewed.IP = prev.IP
-		renewed.Phase = prev.Phase
-		renewed.Ready = prev.Ready
-	}
-	m.pods[pod.Name] = renewed
-	m.mu.Unlock()
-	return *renewed, nil
+	return m.patchPod(ctx, name, patch)
 }
 
 // Release destroys an allocated pod. Sandboxes are single-use: the pool is
@@ -490,6 +490,13 @@ func (m *PodManager) Release(ctx context.Context, name string) error {
 		return fmt.Errorf("%w: %q", ErrSandboxNotAllocated, name)
 	}
 	if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Deleted concurrently — the outcome the caller wanted.
+			m.mu.Lock()
+			delete(m.pods, name)
+			m.mu.Unlock()
+			return fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
+		}
 		return fmt.Errorf("delete pod %q: %w", name, err)
 	}
 	m.mu.Lock()

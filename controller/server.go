@@ -85,13 +85,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "OK"})
 }
 
-func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHome(w http.ResponseWriter, _ *http.Request) {
 	s.render(w, "home.html", map[string]any{
 		"Nav": "home",
 	})
 }
 
-func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAbout(w http.ResponseWriter, _ *http.Request) {
 	s.render(w, "about.html", map[string]any{
 		"Nav": "about",
 	})
@@ -326,7 +326,7 @@ func (s *Server) handleAgentProxy(w http.ResponseWriter, r *http.Request) {
 // defaultAgentURL targets the agent's listen address inside the pod.
 func (s *Server) defaultAgentURL(st PodState) string {
 	port := DefaultAgentPort
-	if pool, ok := s.Config.Pools[st.Pool]; ok {
+	if pool, ok := s.Config.Pools[st.Pool]; ok && pool.Agent.Port > 0 {
 		port = pool.Agent.Port
 	}
 	return "http://" + net.JoinHostPort(st.IP, strconv.Itoa(port))
