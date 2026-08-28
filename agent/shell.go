@@ -192,7 +192,7 @@ func ShellPostHandler() http.HandlerFunc {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := cmd.Start(); err != nil {
+		if err := shellChildren.start(cmd); err != nil {
 			writeSSE(w, flusher, "error", err.Error())
 			writeSSE(w, flusher, "exit", "127")
 			return
@@ -210,7 +210,7 @@ func ShellPostHandler() http.HandlerFunc {
 			// grandchild keeps its inherited pipe fds open. Output still
 			// in flight at that moment may be lost — the alternative
 			// (read-then-Wait) hangs forever on such grandchildren.
-			err := cmd.Wait()
+			err := shellChildren.wait(cmd)
 			wg.Wait()
 			events <- sseEvent{"exit", strconv.Itoa(exitCode(err))}
 			close(events)
