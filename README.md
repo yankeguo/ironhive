@@ -62,7 +62,7 @@ Parameter passing and response conventions follow the agent's: **POST** endpoint
 
 ## ironhive-agent
 
-`ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` / `IHA_LISTEN` (default `:19173`).
+`ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` (default `:19173`) — command line only, no environment variables.
 
 As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so the image needs no tini — `Dockerfile.agent` uses the binary directly as `ENTRYPOINT`.
 

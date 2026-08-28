@@ -17,8 +17,8 @@ import (
 func main() {
 	agent.ReapZombies()
 
-	listen := envOr("IHA_LISTEN", ":19173")
-	flag.StringVar(&listen, "listen", listen, "http listen address")
+	var listen string
+	flag.StringVar(&listen, "listen", ":19173", "http listen address")
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -72,11 +72,4 @@ func main() {
 		log.Println("shutdown:", err)
 		os.Exit(1)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

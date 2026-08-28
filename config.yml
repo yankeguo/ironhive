@@ -17,9 +17,11 @@ pools:
       spec:
         # Boot an arbitrary user image under ironhive-agent: the init
         # container copies the agent binary from the agent image into a
-        # shared emptyDir, and the main container's entrypoint is
-        # replaced with that copy — the agent becomes PID 1, no
-        # arguments needed (IHA_LISTEN defaults to :19173).
+        # shared emptyDir, and the main container's command + args
+        # override the image's ENTRYPOINT and CMD with that copy — the
+        # agent becomes PID 1. The listen address is passed explicitly
+        # (the agent takes flags only, no environment variables);
+        # :19173 is the default anyway.
         volumes:
           - name: ironhive-bin
             emptyDir: {}
@@ -34,6 +36,7 @@ pools:
           - name: main
             image: python:3.14
             command: ["/.ironhive/bin/ironhive-agent"]
+            args: ["-listen", ":19173"]
             volumeMounts:
               - name: ironhive-bin
                 mountPath: /.ironhive/bin
