@@ -94,7 +94,8 @@ func FilesGetHandler() http.HandlerFunc {
 // FilesPutHandler serves PUT /v1/file?path=<file>: the request body is
 // written to path atomically — the body lands in a temporary file in the
 // same directory, which is then renamed over path, so concurrent readers
-// never see a partial file. Optional query parameters:
+// never see a partial file. Missing parent directories are created
+// automatically. Optional query parameters:
 //
 //	chmod — file mode as zero-prefixed octal, e.g. "0644" (default "0644")
 //	chown — owner as "user:group"; either side may be a name or a numeric
@@ -131,15 +132,16 @@ func FilesPutHandler() http.HandlerFunc {
 			return
 		}
 		defer unlock()
+		// Parent directories are created automatically, like mkdir -p.
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// Write to a temp file in the same directory (same filesystem, so
 		// the rename below is atomic), then rename it over the target.
 		f, err := os.CreateTemp(filepath.Dir(p), ".ironhive-upload-*")
 		if err != nil {
-			if os.IsNotExist(err) {
-				http.Error(w, "not found: "+p, http.StatusNotFound)
-			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		tmpName := f.Name()
