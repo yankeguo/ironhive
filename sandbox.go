@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// Agent output lines are capped at 1 MiB before JSON encoding; control
+// characters can expand sixfold, and the final environment event can be
+// larger. Keep the client bounded while accepting every normal agent event.
+const shellSSEMaxLine = 16 * 1024 * 1024
+
 // Sandbox is a handle to one allocated sandbox pod. Agent calls go
 // through the controller's reverse proxy, addressed by the pod name in
 // the X-Sandbox-ID header.
@@ -23,8 +28,18 @@ type Sandbox struct {
 	LeaseExpires time.Time
 }
 
+func (s *Sandbox) ready() error {
+	if s == nil || s.client == nil || s.Name == "" {
+		return fmt.Errorf("ironhive: invalid sandbox")
+	}
+	return nil
+}
+
 // Renew extends the lease to lease from now and updates LeaseExpires.
 func (s *Sandbox) Renew(ctx context.Context, lease time.Duration) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
 	expires, err := s.client.Renew(ctx, s.Name, lease)
 	if err != nil {
 		return err
@@ -36,6 +51,9 @@ func (s *Sandbox) Renew(ctx context.Context, lease time.Duration) error {
 // Release destroys the sandbox. Always call it when done — the lease
 // would reclaim the pod eventually, but releasing is immediate.
 func (s *Sandbox) Release(ctx context.Context) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
 	return s.client.Release(ctx, s.Name)
 }
 
@@ -44,7 +62,19 @@ func (s *Sandbox) Release(ctx context.Context) error {
 // API under /agent/v1/...). The response body is open on success; the
 // caller must close it.
 func (s *Sandbox) AgentDo(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
+	if err := s.ready(); err != nil {
+		return nil, err
+	}
 	return s.client.do(ctx, method, path, query, body, http.Header{
+		"X-Sandbox-ID": {s.Name},
+	})
+}
+
+func (s *Sandbox) agentPostForm(ctx context.Context, path string, form url.Values) (*http.Response, error) {
+	if err := s.ready(); err != nil {
+		return nil, err
+	}
+	return s.client.doPostForm(ctx, path, form, http.Header{
 		"X-Sandbox-ID": {s.Name},
 	})
 }
@@ -164,7 +194,7 @@ func (s *Sandbox) upload(ctx context.Context, endpoint, path, targetURL string, 
 		}
 	}
 	tar.apply(form)
-	resp, err := s.AgentDo(ctx, http.MethodPost, endpoint, form, nil)
+	resp, err := s.agentPostForm(ctx, endpoint, form)
 	if err != nil {
 		return err
 	}
@@ -218,10 +248,10 @@ type ShellOptions struct {
 
 // ShellEvent is one server-sent event of a shell call.
 type ShellEvent struct {
-	// Type is the SSE event name: stdout, stderr, exit, cwd or env.
+	// Type is the SSE event name: stdout, stderr, error, exit, cwd or env.
 	Type string
 	// Data is the payload: the decoded text for stdout / stderr / exit /
-	// cwd events, the raw JSON object for env.
+	// cwd / error events, or the raw JSON object for env.
 	Data string
 }
 
@@ -229,7 +259,9 @@ type ShellEvent struct {
 // onEvent: one stdout / stderr event per output line, a final exit event
 // with the exit code, then cwd / env snapshots. Cancelling ctx
 // disconnects, which makes the agent SIGTERM the command's whole process
-// group — the reliable cancel mechanism.
+// group — the reliable cancel mechanism. Command failures are reported as
+// error and non-zero exit events, not as this method's return error. A nil
+// onEvent discards events while still draining the stream.
 func (s *Sandbox) Shell(ctx context.Context, command string, opts *ShellOptions, onEvent func(ShellEvent) error) error {
 	form := url.Values{"command": {command}}
 	if opts != nil {
@@ -243,11 +275,14 @@ func (s *Sandbox) Shell(ctx context.Context, command string, opts *ShellOptions,
 			form.Set("strict_env", "true")
 		}
 	}
-	resp, err := s.AgentDo(ctx, http.MethodPost, "/agent/v1/shell", form, nil)
+	resp, err := s.agentPostForm(ctx, "/agent/v1/shell", form)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if onEvent == nil {
+		onEvent = func(ShellEvent) error { return nil }
+	}
 
 	var eventType string
 	var data []string
@@ -265,7 +300,7 @@ func (s *Sandbox) Shell(ctx context.Context, command string, opts *ShellOptions,
 		return onEvent(ev)
 	}
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), shellSSEMaxLine)
 	for sc.Scan() {
 		line := sc.Text()
 		switch {

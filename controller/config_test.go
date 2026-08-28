@@ -125,4 +125,9 @@ func TestLoadConfigErrors(t *testing.T) {
 	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "invalid name") {
 		t.Fatalf("bad pool name: err = %v", err)
 	}
+	// Namespace names must be valid before any Kubernetes request is made.
+	p = writeConfig(t, "kubernetes:\n  namespace: 'bad namespace'\n")
+	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "kubernetes.namespace") {
+		t.Fatalf("bad namespace: err = %v", err)
+	}
 }

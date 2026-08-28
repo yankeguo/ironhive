@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,11 @@ func TestListSeedsState(t *testing.T) {
 	if p.Name != "sandbox-existing" || p.Pool != "default" || p.IP != "10.0.0.7" || p.Phase != corev1.PodRunning {
 		t.Errorf("unexpected state: %+v", p)
 	}
+	select {
+	case <-m.initialList:
+	default:
+		t.Fatal("initial list barrier was not released")
+	}
 }
 
 func TestApplyEventUpdatesState(t *testing.T) {
@@ -163,15 +169,51 @@ func TestApplyEventUpdatesState(t *testing.T) {
 		t.Errorf("after modify: %+v", p)
 	}
 
+	deleting := ready.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	m.applyEvent(watch.Event{Type: watch.Modified, Object: deleting})
+	if !m.Pods()[0].Deleting {
+		t.Error("deletion timestamp was not reflected in pod state")
+	}
+
 	m.applyEvent(watch.Event{Type: watch.Deleted, Object: pod})
 	if got := len(m.Pods()); got != 0 {
 		t.Fatalf("after delete: %d pods, want 0", got)
 	}
 
-	// Non-pod objects (e.g. watch.Error status) are ignored.
+	// applyEvent ignores non-pod objects; watch errors are handled by the
+	// outer watch loop before it calls this helper.
 	m.applyEvent(watch.Event{Type: watch.Error, Object: &metav1.Status{}})
 	if got := len(m.Pods()); got != 0 {
 		t.Fatalf("after error event: %d pods, want 0", got)
+	}
+}
+
+func TestWatchReturnsOnErrorEvent(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	fw := watch.NewFake()
+	kube.Fake.PrependWatchReactor("pods", func(ktesting.Action) (bool, watch.Interface, error) {
+		return true, fw, nil
+	})
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- m.watch(context.Background(), "1")
+	}()
+	fw.Error(&metav1.Status{
+		Status:  metav1.StatusFailure,
+		Reason:  metav1.StatusReasonGone,
+		Code:    410,
+		Message: "too old resource version",
+	})
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "too old resource version") {
+			t.Fatalf("watch error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not return after an error event")
 	}
 }
 
@@ -241,6 +283,20 @@ func TestAllocateUnknownPool(t *testing.T) {
 	m := NewPodManager(fake.NewSimpleClientset(), "ironhive", testPoolConfig(0))
 	if _, err := m.Allocate(context.Background(), "nope", time.Minute, time.Second); !errors.Is(err, ErrUnknownPool) {
 		t.Errorf("want ErrUnknownPool, got %v", err)
+	}
+}
+
+func TestCandidatesExcludeDeletingAndStalePods(t *testing.T) {
+	m := NewPodManager(fake.NewSimpleClientset(), "ironhive", testPoolConfig(2))
+	m.reconcile(context.Background())
+	markReady(m)
+	pods := m.Pods()
+	m.mu.Lock()
+	m.pods[pods[0].Name].Deleting = true
+	m.pods[pods[1].Name].TemplateHash = "stale"
+	m.mu.Unlock()
+	if got := m.candidates("default"); len(got) != 0 {
+		t.Fatalf("candidates = %+v, want none", got)
 	}
 }
 
@@ -449,6 +505,237 @@ func TestReconcileReapsExpiredLease(t *testing.T) {
 	}
 	if len(pods.Items) != 1 {
 		t.Fatalf("after reap+top-up: %d pods, want 1", len(pods.Items))
+	}
+}
+
+func TestReconcileDeleteUsesSnapshotResourceVersion(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+	m.reconcile(ctx)
+	st := m.Pods()[0]
+	m.mu.Lock()
+	m.pods[st.Name].Allocated = true
+	m.pods[st.Name].LeaseExpires = time.Now().Add(-time.Minute)
+	m.pods[st.Name].ResourceVersion = "17"
+	m.mu.Unlock()
+
+	var gotRV string
+	kube.Fake.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		opts := action.(ktesting.DeleteAction).GetDeleteOptions()
+		if opts.Preconditions != nil && opts.Preconditions.ResourceVersion != nil {
+			gotRV = *opts.Preconditions.ResourceVersion
+		}
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Resource: "pods"}, st.Name, errors.New("changed concurrently"))
+	})
+	m.reconcile(ctx)
+
+	if gotRV != "17" {
+		t.Fatalf("delete resourceVersion = %q, want 17", gotRV)
+	}
+	cached, ok := m.Lookup(st.Name)
+	if !ok {
+		t.Fatal("conflicted sweep removed the pod from cache")
+	}
+	if cached.Allocated {
+		t.Fatal("conflicted sweep did not refresh the cache from the API")
+	}
+}
+
+func TestReconcileFreshUsesAuthoritativeList(t *testing.T) {
+	cfg := testPoolConfig(1)
+	existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:            "sandbox-existing",
+		Namespace:       "ironhive",
+		ResourceVersion: "9",
+		Labels: map[string]string{
+			LabelManagedBy:    ManagedByValue,
+			LabelPool:         "default",
+			LabelTemplateHash: podTemplateHash(cfg.Pools["default"].PodTemplate),
+		},
+	}}
+	kube := fake.NewSimpleClientset(existing)
+	m := NewPodManager(kube, "ironhive", cfg)
+
+	// Simulate a newly promoted replica whose watch cache has not observed
+	// the previous leader's existing standby yet.
+	m.reconcileFresh(context.Background())
+	pods, err := kube.CoreV1().Pods("ironhive").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].Name != existing.Name {
+		t.Fatalf("authoritative reconcile produced pods %+v", pods.Items)
+	}
+}
+
+func TestPatchPodDoesNotResurrectDeletedCacheEntry(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "sandbox-a",
+		Namespace: "ironhive",
+		Labels:    map[string]string{LabelManagedBy: ManagedByValue, LabelPool: "default"},
+	}}
+	kube := fake.NewSimpleClientset(pod)
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	if _, err := m.list(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	kube.Fake.PrependReactor("patch", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		close(started)
+		<-release
+		return false, nil, nil
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.patchPod(context.Background(), pod.Name,
+			`{"metadata":{"annotations":{"ironhive.dev/allocated":"now"}}}`)
+		errCh <- err
+	}()
+	<-started
+	m.applyEvent(watch.Event{Type: watch.Deleted, Object: pod})
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Lookup(pod.Name); ok {
+		t.Fatal("out-of-order patch response resurrected a deleted pod")
+	}
+}
+
+func TestPatchPodDoesNotOverwriteAdvancedCacheEntry(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "sandbox-a",
+		Namespace: "ironhive",
+		Labels:    map[string]string{LabelManagedBy: ManagedByValue, LabelPool: "default"},
+		Annotations: map[string]string{
+			AnnotationAllocated:    "old",
+			AnnotationLeaseExpires: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
+		},
+	}}
+	kube := fake.NewSimpleClientset(pod)
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	if _, err := m.list(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	kube.Fake.PrependReactor("patch", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		close(started)
+		<-release
+		return false, nil, nil
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.patchPod(context.Background(), pod.Name,
+			`{"metadata":{"annotations":{"ironhive.dev/lease-expires":"2030-01-01T00:00:00Z"}}}`)
+		errCh <- err
+	}()
+	<-started
+	advanced := pod.DeepCopy()
+	advanced.ResourceVersion = "99"
+	advanced.Annotations[AnnotationLeaseExpires] = "2040-01-01T00:00:00Z"
+	m.applyEvent(watch.Event{Type: watch.Modified, Object: advanced})
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	cached, ok := m.Lookup(pod.Name)
+	if !ok {
+		t.Fatal("advanced cache entry disappeared")
+	}
+	if cached.ResourceVersion != "99" || cached.LeaseExpires.Year() != 2040 {
+		t.Fatalf("cache regressed to %+v", cached)
+	}
+}
+
+func TestReconcileScalesDownSurplusStandby(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(3))
+	ctx := context.Background()
+	m.reconcile(ctx)
+	before := m.Pods()
+
+	pool := m.cfg.Pools["default"]
+	pool.Standby.Static.Count = 1
+	m.cfg.Pools["default"] = pool
+	m.reconcile(ctx)
+
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("standby pods = %d, want 1", len(pods.Items))
+	}
+	if pods.Items[0].Name != before[0].Name {
+		t.Fatalf("kept pod %q, want oldest %q", pods.Items[0].Name, before[0].Name)
+	}
+	if got := len(m.Pods()); got != 1 {
+		t.Fatalf("cache has %d pods, want 1", got)
+	}
+}
+
+func TestReconcileScalesDownUnreadyPodsFirst(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(3))
+	ctx := context.Background()
+	m.reconcile(ctx)
+	pods := m.Pods()
+	m.mu.Lock()
+	for _, p := range pods[:2] {
+		m.pods[p.Name].Phase = corev1.PodRunning
+		m.pods[p.Name].Ready = true
+		m.pods[p.Name].IP = "10.0.0.1"
+	}
+	m.mu.Unlock()
+	unready := pods[2].Name
+
+	pool := m.cfg.Pools["default"]
+	pool.Standby.Static.Count = 2
+	m.cfg.Pools["default"] = pool
+	m.reconcile(ctx)
+
+	if _, err := kube.CoreV1().Pods("ironhive").Get(ctx, unready, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unready surplus pod still exists: %v", err)
+	}
+	for _, p := range pods[:2] {
+		if _, err := kube.CoreV1().Pods("ironhive").Get(ctx, p.Name, metav1.GetOptions{}); err != nil {
+			t.Fatalf("ready pod %s was deleted: %v", p.Name, err)
+		}
+	}
+}
+
+func TestCreatePodStripsControllerAnnotations(t *testing.T) {
+	cfg := testPoolConfig(1)
+	pool := cfg.Pools["default"]
+	pool.PodTemplate.Annotations = map[string]string{
+		AnnotationAllocated:    "spoofed",
+		AnnotationLeaseExpires: "2099-01-01T00:00:00Z",
+		"example.com/keep":     "yes",
+	}
+	cfg.Pools["default"] = pool
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", cfg)
+	m.reconcile(context.Background())
+
+	pod, err := kube.CoreV1().Pods("ironhive").Get(context.Background(), m.Pods()[0].Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pod.Annotations[AnnotationAllocated]; ok {
+		t.Error("allocated annotation copied from template")
+	}
+	if _, ok := pod.Annotations[AnnotationLeaseExpires]; ok {
+		t.Error("lease annotation copied from template")
+	}
+	if pod.Annotations["example.com/keep"] != "yes" {
+		t.Error("ordinary template annotation was lost")
+	}
+	if m.Pods()[0].Allocated {
+		t.Error("new standby pod is marked allocated")
 	}
 }
 

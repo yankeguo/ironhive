@@ -21,7 +21,7 @@ The controller's web UI is retro on the server, modern in the build:
 | `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback; namespace resolution |
 | `controller/config.go` | `config.yml` loading: sections `http` (`listen`, default `:8080`), `kubernetes` (`kubeconfig`, `namespace`), and `pools.<name>` with `standby.static.count` (default 10), `podTemplate` (`corev1.PodTemplateSpec`), `agent.port` (default 19173) |
 | `config.yml` | Example controller configuration with one `default` pool |
-| `deploy/rbac.yaml` | Example RBAC: ServiceAccount + Role (pods get/list/watch/create/update/patch/delete) in the `ironhive` namespace |
+| `deploy/rbac.yaml` | Example RBAC: ServiceAccount + namespaced Role for pods, leader-election leases and events |
 | `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
 | `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
 | `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
@@ -44,14 +44,14 @@ For in-cluster operation, `deploy/rbac.yaml` is a ready-to-apply example scoped 
 
 The pod manager (`controller/pods.go`) keeps each pool's standby pods warm and tracks every managed pod in memory:
 
-- Pods are named `sandbox-<lowercase ULID>` and carry enforced labels — `app.kubernetes.io/managed-by=ironhive-controller` (also the list/watch selector), `ironhive.dev/pool=<pool name>`, and `ironhive.dev/template-hash` (a deterministic hash of the pool's `podTemplate` at creation time) — merged over any template labels.
-- A list+watch loop maintains an in-memory map of pod states (phase, Ready condition, IP, allocation, lease deadline, template hash). It runs on **every** replica — it feeds the allocate fast path. A broken watch is re-established from a fresh list with backoff.
-- **Reconcile is single-writer**: replicas elect a leader through a `coordination.k8s.io` Lease named `ironhive-controller` in the managed namespace, and only the leader runs the reconcile loop — top-up, sweeps, lease reaping, template recycling. Pool sizing is therefore strongly consistent across replicas (no over-creation, template rollouts converge exactly once), and failover is a matter of one lease expiry. The allocate / renew / release paths stay multi-replica: claims are serialized by the API server via the resourceVersion precondition, so they need no leader.
-- Reconcile tops each pool up to `standby.static.count` (allocated pods don't count — they are in use, not standby), sweeps `Succeeded` / `Failed` pods, destroys pods whose lease has expired, and recycles standby pods whose template hash no longer matches the config (e.g. after the controller restarts with an updated `podTemplate`) — so the pool converges on the current template. Allocated pods are never recycled early; their lease expiry reclaims them in time.
+- Pods are named `sandbox-<lowercase ULID>` and carry enforced labels — `app.kubernetes.io/managed-by=ironhive-controller` (also the list/watch selector), `ironhive.dev/pool=<pool name>`, and `ironhive.dev/template-hash` (a deterministic hash of the pool's `podTemplate` at creation time) — merged over any template labels. The controller-owned allocation annotations are stripped from templates when a standby pod is created.
+- A list+watch loop maintains an in-memory map of pod states (phase, Ready condition, deletion, IP, allocation, lease deadline, template hash). It runs on **every** replica — it feeds the allocate fast path. A replica waits for its first successful list before joining leader election, and a broken/error watch is re-established from a fresh list with backoff.
+- **Reconcile is single-writer**: replicas elect a leader through a `coordination.k8s.io` Lease named `ironhive-controller` in the managed namespace, and only the leader runs the reconcile loop — exact sizing, sweeps, lease reaping, template recycling. Every leader pass starts from its own authoritative List rather than a potentially lagging watch cache, so failover cannot duplicate a pool. The allocate / renew / release paths stay multi-replica: claims are serialized by the API server via the resourceVersion precondition, so they need no leader.
+- Reconcile makes each pool converge to exactly `standby.static.count` (allocated and terminating pods don't count), preferentially removes surplus pods that are not Ready, sweeps `Succeeded` / `Failed` pods, destroys pods whose lease has expired, and recycles standby pods whose template hash no longer matches the config. Every sweep carries the observed `resourceVersion`, so a concurrent allocation or renewal wins instead of having its pod deleted. Allocated pods are never recycled early; their lease expiry reclaims them in time.
 - **Allocation state lives on the pod object** as the `ironhive.dev/allocated` and `ironhive.dev/lease-expires` annotations. Claiming is a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition, so racing controller replicas cannot claim the same pod — the API server accepts exactly one. No leader election; state survives controller restarts and is shared by all replicas through the watch.
-- Every allocation carries a **lease**: the caller declares a duration at allocate time and extends it with `renew`; reconcile destroys the pod once the deadline passes, so a crashed caller can never leak a sandbox forever.
+- Every allocation carries a **lease**: the caller declares a duration at allocate time and extends it with `renew`; the next periodic reconcile after the deadline (normally within 30 seconds) destroys the pod, so a crashed caller can never leak a sandbox forever.
 - Sandboxes are **single-use**: releasing (or lease expiry) destroys the pod and reconcile tops the pool up with a fresh one.
-- Pod readiness is whatever the template declares: the example `config.yml` gates Ready on the agent's `/healthz` via a `readinessProbe`, so an allocated sandbox is already serving when handed out.
+- Pod readiness is whatever the template declares: the example `config.yml` gates Ready on the agent's `/healthz` via a `readinessProbe`. Allocation additionally rejects terminating pods and pods left from an older template.
 
 ### API
 
@@ -61,8 +61,8 @@ The pod manager (`controller/pods.go`) keeps each pool's standby pods warm and t
 | `POST /controller/v1/allocate?pool=&lease=` | Claim one Ready standby pod of the pool; blocks up to 30 s waiting for one to become available. `lease` is a mandatory Go duration string (`30s`, `5m`, `1h`) — the pod is destroyed when it expires unless renewed. Returns `{"sandbox":"<pod name>","leaseExpires":"<RFC3339>"}`; `400` for a missing/unknown pool or a missing/invalid lease, `503` when none became available in time |
 | `POST /controller/v1/renew?sandbox=&lease=` | Extend an allocated pod's lease to `lease` from now. Returns `{"sandbox":"<pod name>","leaseExpires":"<RFC3339>"}`; `400` for a missing/invalid lease, `404` for an unknown or unallocated sandbox |
 | `POST /controller/v1/release?sandbox=` | Destroy an allocated pod; the pool is topped up with a fresh standby pod asynchronously. Returns `{"released":"<pod name>"}`; `404` for an unknown or unallocated sandbox |
-| `GET /controller/v1/pools` | Read-only cluster overview for the dashboard: per-pool `standby` / `pending` / `allocated` counts plus every managed pod with phase, Ready, IP, allocation and lease deadline. Unauthenticated and CORS-open (`Access-Control-Allow-Origin: *`) by design |
-| `ANY /agent/**` | Reverse-proxy to the agent inside the pod named by the `X-Sandbox-ID` request header (`http://<podIP>:<agentPort>`); the path is preserved — the agent serves its own API under `/agent/v1/...`. `404` when the sandbox is unknown, unallocated, or has no IP yet; `502` when the agent cannot be reached |
+| `GET /controller/v1/pools` | Read-only cluster overview for the dashboard: per-pool `standby` / `pending` / `allocated` counts plus every managed pod with phase, Ready, deleting state, IP, allocation and lease deadline. Terminating pods remain visible but are excluded from capacity counts. Unauthenticated and CORS-open (`Access-Control-Allow-Origin: *`) by design |
+| `ANY /agent/**` | Reverse-proxy to the agent inside the pod named by the `X-Sandbox-ID` request header (`http://<podIP>:<agentPort>`); the path is preserved — the agent serves its own API under `/agent/v1/...`. `404` when the sandbox is unknown, unallocated, terminating, or has no IP yet; `502` when the agent cannot be reached |
 
 Parameter passing and response conventions follow the agent's: **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts); non-data responses (successes and errors alike) use the JSON envelope `{"message": ...}`.
 
@@ -78,22 +78,22 @@ The root package (`import "github.com/yankeguo/ironhive"`) wraps the controller 
 c := ironhive.NewClient("http://ironhive-controller:8080")
 sb, err := c.Allocate(ctx, "default", 5*time.Minute)
 if err != nil { /* handle */ }
-defer sb.Release(ctx)
+defer sb.Release(context.Background()) // use a cleanup context, not an expired work context
 
 _ = sb.PutFile(ctx, "/tmp/input.txt", strings.NewReader("data"), nil)
 err = sb.Shell(ctx, "wc -l /tmp/input.txt", nil, func(ev ironhive.ShellEvent) error {
-	// ev.Type: stdout / stderr / exit / cwd / env
+	// ev.Type: stdout / stderr / error / exit / cwd / env
 	return nil
 })
 ```
 
-Controller-level calls (`Renew`, `Release`, `Pools`) exist on `Client` too; `Sandbox.AgentDo` is the low-level escape hatch for anything the convenience methods (file / tar / dir / shell) don't cover. Requests carry no client-side timeout — deadlines belong to the caller's context, matching the controller/agent philosophy. Non-2xx responses decode into `*ironhive.Error` from the `{"message": ...}` envelope.
+Controller-level calls (`Renew`, `Release`, `Pools`) exist on `Client` too; `Sandbox.AgentDo` is the low-level escape hatch for anything the convenience methods (file / tar / dir / shell) don't cover. Built-in POST calls use urlencoded form bodies, while `AgentDo` preserves exactly the query and body supplied by its caller. Requests carry no client-side timeout — deadlines belong to the caller's context, matching the controller/agent philosophy. Non-2xx responses decode into `*ironhive.Error` from the `{"message": ...}` envelope. `Shell` reports command failures through `error` / non-zero `exit` events rather than its return error; a nil callback discards events while still waiting for completion.
 
 ## ironhive-agent
 
 `ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` (default `:19173`) — command line only, no environment variables.
 
-As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so the image needs no tini — `Dockerfile.agent` uses the binary directly as `ENTRYPOINT`.
+As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — `Dockerfile.agent` uses the binary directly as `ENTRYPOINT`. Shell PIDs are registered as owned by `exec.Cmd`; the SIGCHLD reaper validates that procfs belongs to its PID namespace, enumerates direct children, and calls targeted `wait4(pid)` only for adopted orphans, so it cannot steal a shell's exit status. If procfs is unavailable, the conservative fallback waits for arbitrary children only while no managed shell is active.
 
 ### API
 
@@ -144,7 +144,7 @@ event: env
 data: {"HOME":"/root","PATH":"/usr/bin", ...}
 ```
 
-One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code (128+signal when the command died to a signal, e.g. `143` for SIGTERM), then the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
+One `stdout`/`stderr` event per output line; stream or spawn failures also produce an `error` event. A final `exit` event carries the exit code (128+signal when the command died to a signal, e.g. `143` for SIGTERM), followed by the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
 
 If the client disconnects, the command's whole **process group** (bash plus any pipeline or subshell children) receives `SIGTERM` — the wrapper's `EXIT` trap still saves the state snapshot — and the process is `SIGKILL`ed after a 5-second grace period. Disconnecting is therefore a reliable cancel; a command whose descendants ignore `SIGTERM` may leave orphans behind, which are reparented to PID 1 and reaped when they eventually die.
 
@@ -172,16 +172,19 @@ go run ./cmd/ironhive-controller
 ## Build
 
 ```bash
-(cd controller/web && bun run typecheck && bun run build)
+(cd controller/web && bun install --frozen-lockfile && bun run typecheck && bun run build)
+gofmt -l . # must print nothing
+go vet ./...
 go test ./...
-go build ./cmd/ironhive-controller ./cmd/ironhive-agent
+go test -race ./...
+go build ./...
 ```
 
 `controller/web/dist` is git-ignored (only `.gitkeep` is committed), so always run the frontend build before `go build` — in Docker, do it in an `oven/bun` stage.
 
 ## Release
 
-`.github/workflows/release.yml` builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
+`.github/workflows/release.yml` runs the full frontend and Go quality suite for pull requests and pushes. On `main` / tag pushes only, a successful quality job builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
 
 - push `main` → `controller-latest` / `agent-latest` and `controller-latest-<short_sha>` / `agent-latest-<short_sha>`
 - push a git tag → `controller-<tag>` / `agent-<tag>`

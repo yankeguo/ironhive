@@ -10,22 +10,23 @@
 <body>
   {{template "nav" .}}
   <main class="mx-auto max-w-screen-xl px-4 py-6 space-y-6">
-    <div id="banner" class="hidden rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-red-300"></div>
-    <section id="pools" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></section>
+    <div id="banner" class="hidden rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-red-300" role="status" aria-live="polite"></div>
+    <section id="pools" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-label="Sandbox pools"></section>
     <section class="card">
       <div class="card-header">Pods</div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
+          <caption class="sr-only">Managed sandbox pods</caption>
           <thead>
             <tr class="border-b border-neutral-700 text-left text-neutral-400">
-              <th class="px-4 py-2 font-medium">Name</th>
-              <th class="px-4 py-2 font-medium">Pool</th>
-              <th class="px-4 py-2 font-medium">Phase</th>
-              <th class="px-4 py-2 font-medium">Ready</th>
-              <th class="px-4 py-2 font-medium">IP</th>
-              <th class="px-4 py-2 font-medium">Status</th>
-              <th class="px-4 py-2 font-medium">Lease</th>
-              <th class="px-4 py-2 font-medium">Age</th>
+              <th class="px-4 py-2 font-medium" scope="col">Name</th>
+              <th class="px-4 py-2 font-medium" scope="col">Pool</th>
+              <th class="px-4 py-2 font-medium" scope="col">Phase</th>
+              <th class="px-4 py-2 font-medium" scope="col">Ready</th>
+              <th class="px-4 py-2 font-medium" scope="col">IP</th>
+              <th class="px-4 py-2 font-medium" scope="col">Status</th>
+              <th class="px-4 py-2 font-medium" scope="col">Lease</th>
+              <th class="px-4 py-2 font-medium" scope="col">Age</th>
             </tr>
           </thead>
           <tbody id="pods"></tbody>

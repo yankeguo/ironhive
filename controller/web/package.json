@@ -1,6 +1,7 @@
 {
   "name": "ironhive-static",
   "private": true,
+  "packageManager": "bun@1.4.0",
   "scripts": {
     "build": "bun run build.ts",
     "dev": "BUN_WATCH=1 bun --watch run build.ts",

@@ -24,8 +24,9 @@ pools:
       static:
         count: 10
     # podTemplate — Kubernetes pod template the pool's pods are created
-    # from; labels and annotations may be set but are rarely needed —
-    # the controller merges them with its own enforced entries.
+    # from; labels and annotations may be set but are rarely needed. The
+    # controller overrides its management labels and strips the reserved
+    # ironhive.dev/allocated and ironhive.dev/lease-expires annotations.
     podTemplate:
       spec:
         # Boot an arbitrary user image under ironhive-agent: the init

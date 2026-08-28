@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -250,5 +251,156 @@ func TestAgentProxy(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("proxy without sandbox id: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(nil, testPoolConfig(1), nil).Handler().ServeHTTP(
+		rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "style-src 'self'") || strings.Contains(csp, "unsafe-inline") {
+		t.Fatalf("Content-Security-Policy = %q", csp)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "" {
+		t.Fatalf("X-Frame-Options = %q, want deliberately absent", got)
+	}
+}
+
+func TestRenderTemplateBuffersErrors(t *testing.T) {
+	body, err := renderTemplate("home.html", map[string]any{"Nav": "home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `aria-current="page"`) {
+		t.Fatal("rendered home page is missing current-page navigation")
+	}
+	if _, err := renderTemplate("missing.html", nil); err == nil {
+		t.Fatal("missing template did not return an error")
+	}
+}
+
+func TestAgentProxySanitizesUpstreamErrors(t *testing.T) {
+	s := testServerWithPods(t)
+	st, err := s.Pods.Allocate(context.Background(), "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	rawURL := upstream.URL
+	upstream.Close()
+	s.agentURL = func(PodState) string { return rawURL }
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/agent/v1/file", nil)
+	req.Header.Set("X-Sandbox-ID", st.Name)
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	var envelope map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["message"] != "upstream agent unavailable" ||
+		strings.Contains(envelope["message"], "connect") {
+		t.Fatalf("message = %q", envelope["message"])
+	}
+}
+
+func TestAgentProxyRejectsDeletingSandbox(t *testing.T) {
+	s := testServerWithPods(t)
+	st, err := s.Pods.Allocate(context.Background(), "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Pods.mu.Lock()
+	s.Pods.pods[st.Name].Deleting = true
+	s.Pods.mu.Unlock()
+	targetCalled := false
+	s.agentURL = func(PodState) string {
+		targetCalled = true
+		return "http://agent.invalid"
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/agent/v1/file", nil)
+	req.Header.Set("X-Sandbox-ID", st.Name)
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if targetCalled {
+		t.Fatal("deleting sandbox was sent to the proxy")
+	}
+}
+
+func TestPoolsExcludeDeletingPodsFromCounts(t *testing.T) {
+	s := testServerWithPods(t)
+	pod := s.Pods.Pods()[0]
+	s.Pods.mu.Lock()
+	s.Pods.pods[pod.Name].Deleting = true
+	s.Pods.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/controller/v1/pools", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var out struct {
+		Pools []poolSummary `json:"pools"`
+		Pods  []podInfo     `json:"pods"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Pools) != 1 || out.Pools[0].Standby != 0 || out.Pools[0].Pending != 0 ||
+		out.Pools[0].Allocated != 0 {
+		t.Fatalf("pool summary = %+v", out.Pools)
+	}
+	if len(out.Pods) != 1 || !out.Pods[0].Deleting {
+		t.Fatalf("pods = %+v", out.Pods)
+	}
+}
+
+func TestPostBodyOverridesQuery(t *testing.T) {
+	s := testServerWithPods(t)
+	body := url.Values{"pool": {"default"}, "lease": {"5m"}}.Encode()
+	req := httptest.NewRequest(http.MethodPost,
+		"/controller/v1/allocate?pool=missing&lease=1s", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want body parameters to win", rec.Code, rec.Body)
+	}
+}
+
+func TestAgentProxySanitizesInvalidTarget(t *testing.T) {
+	s := testServerWithPods(t)
+	st, err := s.Pods.Allocate(context.Background(), "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.agentURL = func(PodState) string { return "://invalid" }
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/agent/v1/file", nil)
+	req.Header.Set("X-Sandbox-ID", st.Name)
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var envelope map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["message"] != "internal error" {
+		t.Fatalf("message = %q", envelope["message"])
 	}
 }

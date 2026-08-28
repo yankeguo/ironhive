@@ -39,6 +39,12 @@ var (
 // It returns when ctx is cancelled, releasing the lease for a fast
 // failover.
 func (m *PodManager) RunLeaderElection(ctx context.Context) {
+	// Joining the election before the first list can make a restarting
+	// controller reconcile an empty cache and duplicate the whole pool.
+	if !m.waitForInitialList(ctx) {
+		return
+	}
+
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
