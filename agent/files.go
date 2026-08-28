@@ -29,6 +29,20 @@ func writeError(w http.ResponseWriter, msg string, code int) {
 	writeMessage(w, code, msg)
 }
 
+// formParams parses and returns the merged query and urlencoded form-body
+// parameters of a POST request — both are allowed, and body entries take
+// precedence over query entries on conflicts. PUT endpoints must not use
+// this: their parameters live only in the query string and the body is the
+// data stream. On failure it writes the error response and returns
+// ok == false.
+func formParams(w http.ResponseWriter, r *http.Request) (url.Values, bool) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, "invalid form: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	return r.Form, true
+}
+
 // resolveFilePath returns p as an absolute, cleaned path, resolving
 // relative paths against the process working directory.
 func resolveFilePath(p string) (string, error) {
@@ -56,13 +70,14 @@ func lockPath(p string) func() {
 	return mu.Unlock
 }
 
-// requirePath extracts the "path" query parameter, resolves it to an
-// absolute path and locks it. On failure it writes the error response and
-// returns ok == false.
-func requirePath(w http.ResponseWriter, r *http.Request) (p string, unlock func(), ok bool) {
-	raw := r.URL.Query().Get("path")
+// requirePath extracts the "path" parameter from q (the query string for
+// GET/PUT endpoints, the merged query+form for POST endpoints), resolves
+// it to an absolute path and locks it. On failure it writes the error
+// response and returns ok == false.
+func requirePath(w http.ResponseWriter, q url.Values) (p string, unlock func(), ok bool) {
+	raw := q.Get("path")
 	if raw == "" {
-		writeError(w, "missing query parameter: path", http.StatusBadRequest)
+		writeError(w, "missing parameter: path", http.StatusBadRequest)
 		return "", nil, false
 	}
 	p, err := resolveFilePath(raw)
@@ -78,7 +93,7 @@ func requirePath(w http.ResponseWriter, r *http.Request) (p string, unlock func(
 // process working directory.
 func FilesGetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, r.URL.Query())
 		if !ok {
 			return
 		}
@@ -121,7 +136,7 @@ func FilesGetHandler() http.HandlerFunc {
 //	        id, and either side may be omitted ("user", ":group", "1000:1000")
 func FilesPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, r.URL.Query())
 		if !ok {
 			return
 		}
@@ -314,13 +329,16 @@ func uploadStream(w http.ResponseWriter, r *http.Request, method, rawURL string,
 // "key=value" form. A non-2xx upstream response is reported as 502.
 func FilesUploadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
+		q, ok := formParams(w, r)
+		if !ok {
+			return
+		}
 		// Validate options before touching the filesystem.
 		method, rawURL, hdrs, ok := parseUploadOptions(w, q)
 		if !ok {
 			return
 		}
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, q)
 		if !ok {
 			return
 		}

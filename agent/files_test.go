@@ -294,6 +294,41 @@ func TestFilesUpload(t *testing.T) {
 	}
 }
 
+// TestFilesUploadFormParams: POST endpoints accept parameters in the
+// urlencoded form body as well as the query string.
+func TestFilesUploadFormParams(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(p, []byte("via-form"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+	}))
+	defer srv.Close()
+
+	form := url.Values{
+		"path":   {p},
+		"url":    {srv.URL + "/up"},
+		"method": {"patch"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/file/upload", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	FilesUploadHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if gotMethod != http.MethodPatch {
+		t.Fatalf("method = %q, want PATCH", gotMethod)
+	}
+	if gotBody != "via-form" {
+		t.Fatalf("body = %q", gotBody)
+	}
+}
+
 func TestFilesUploadErrors(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {

@@ -68,9 +68,11 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// ShellPostHandler serves POST /v1/shell, running the form field "command"
-// via bash. The shell is stateless: every call starts from the process
-// working directory and environment, unless overridden by form fields:
+// ShellPostHandler serves POST /v1/shell, running the "command" parameter
+// via bash. Parameters may arrive in the query string, the urlencoded form
+// body, or both (body wins on conflicts). The shell is stateless: every
+// call starts from the process working directory and environment, unless
+// overridden by parameters:
 //
 //	cwd — working directory; absolute, or relative to the process working
 //	      directory. Must be an existing directory.
@@ -100,12 +102,16 @@ func shellQuote(s string) string {
 // period.
 func ShellPostHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		command := r.PostFormValue("command")
+		q, ok := formParams(w, r)
+		if !ok {
+			return
+		}
+		command := q.Get("command")
 		if command == "" {
 			writeError(w, "missing form field: command", http.StatusBadRequest)
 			return
 		}
-		cwd := r.PostFormValue("cwd")
+		cwd := q.Get("cwd")
 		if cwd != "" {
 			if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
 				writeError(w, "invalid cwd: not an existing directory: "+cwd, http.StatusBadRequest)
@@ -113,7 +119,7 @@ func ShellPostHandler() http.HandlerFunc {
 			}
 		}
 		var env []string
-		for _, e := range r.PostForm["env"] {
+		for _, e := range q["env"] {
 			k, _, found := strings.Cut(e, "=")
 			if !found || k == "" {
 				writeError(w, fmt.Sprintf("invalid env entry %q: must be KEY=VALUE", e), http.StatusBadRequest)
@@ -122,7 +128,7 @@ func ShellPostHandler() http.HandlerFunc {
 			env = append(env, e)
 		}
 		strictEnv := false
-		if s := r.PostFormValue("strict_env"); s != "" {
+		if s := q.Get("strict_env"); s != "" {
 			b, err := strconv.ParseBool(s)
 			if err != nil {
 				writeError(w, "invalid strict_env: must be a boolean", http.StatusBadRequest)

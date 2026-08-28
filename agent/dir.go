@@ -24,7 +24,7 @@ type dirEntry struct {
 // to the process working directory.
 func DirGetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, r.URL.Query())
 		if !ok {
 			return
 		}
@@ -75,7 +75,7 @@ func DirGetHandler() http.HandlerFunc {
 //	        may be omitted
 func DirPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, r.URL.Query())
 		if !ok {
 			return
 		}

@@ -45,6 +45,8 @@ As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so t
 | `PUT /v1/dir?path=` | Create a directory like `mkdir -p`. Optional `chmod` / `chown`, same syntax as `PUT /v1/file` (default mode `0755`) |
 | `POST /v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below). Optional form fields: `cwd` (working directory; absolute or relative to the process working directory), repeatable `env` (`KEY=VALUE` entries), and `strict_env` (boolean; see below). Calls are stateless and run concurrently |
 
+Parameter passing convention: **PUT** endpoints take parameters only in the query string — the body is the data stream, or empty; **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts).
+
 File operations on the same absolute path are serialized with a per-path mutex.
 
 Endpoints that do not return data answer with a JSON envelope `{"message": ...}` (successes and errors alike, `Content-Type: application/json`), so fields can be added later without breaking clients.

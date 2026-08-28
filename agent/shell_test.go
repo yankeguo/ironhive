@@ -272,6 +272,22 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+// TestShellQueryParams: POST endpoints accept parameters in the query
+// string as well as the form body.
+func TestShellQueryParams(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost,
+		"/v1/shell?command="+url.QueryEscape("echo hi"), nil)
+	rec := httptest.NewRecorder()
+	ShellPostHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	stdout := eventData[string](t, parseSSE(t, rec.Body.String()), "stdout")
+	if len(stdout) != 1 || stdout[0] != "hi" {
+		t.Fatalf("stdout events = %v", stdout)
+	}
+}
+
 func TestShellBadParams(t *testing.T) {
 	for name, form := range map[string]url.Values{
 		"missing command": {},

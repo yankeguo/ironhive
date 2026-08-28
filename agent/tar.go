@@ -134,7 +134,7 @@ func TarGetHandler() http.HandlerFunc {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, r.URL.Query())
 		if !ok {
 			return
 		}
@@ -241,7 +241,10 @@ func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 // as 502.
 func TarUploadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
+		q, ok := formParams(w, r)
+		if !ok {
+			return
+		}
 		method, rawURL, hdrs, ok := parseUploadOptions(w, q)
 		if !ok {
 			return
@@ -251,7 +254,7 @@ func TarUploadHandler() http.HandlerFunc {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, q)
 		if !ok {
 			return
 		}
@@ -315,7 +318,7 @@ func TarPutHandler() http.HandlerFunc {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		p, unlock, ok := requirePath(w, r)
+		p, unlock, ok := requirePath(w, r.URL.Query())
 		if !ok {
 			return
 		}
