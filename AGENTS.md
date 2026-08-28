@@ -8,6 +8,7 @@ Guidance for AI agents (and humans) working in this repository.
 
 - `ironhive-controller` (`cmd/ironhive-controller/`, `controller/`) — keeps standby pods warm per configured pool, hands them out via `POST /controller/v1/allocate`, destroys them on `POST /controller/v1/release`, and reverse-proxies `ANY /agent/**` into the allocated pod. Also serves a small web UI.
 - `ironhive-agent` (`cmd/ironhive-agent/`, `agent/`) — runs as PID 1 inside every sandbox pod (reaps zombies itself, no tini) and exposes file / tar / dir / shell HTTP endpoints.
+- `client` (repo root, package `ironhive` — `client.go`, `sandbox.go`) — Go client for the controller API and, through the controller's proxy, the agent API; std lib only, errors decode from the `{"message": ...}` envelope. Entry point: `ironhive.NewClient`.
 
 ## Build, test, verify
 

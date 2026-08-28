@@ -27,6 +27,7 @@ The controller's web UI is retro on the server, modern in the build:
 | `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
 | `controller/web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
 | `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
+| `client.go`, `sandbox.go` | Root Go client package `ironhive`: controller endpoints (allocate/renew/release/pools) plus agent pass-through (file/tar/dir/shell) via the `Sandbox` handle |
 | `agent/` | Agent package: agent logic for managed containers, PID 1 zombie reaping |
 
 ## ironhive-controller
@@ -68,6 +69,25 @@ Parameter passing and response conventions follow the agent's: **POST** endpoint
 ### Dashboard
 
 The home page is a read-only overview of the cluster: per-pool standby / pending / allocated counts and a live pod table (phase, readiness, IP, status, remaining lease, age), polling `GET /controller/v1/pools` every 3 s. It is unauthenticated and deliberately frameable — `X-Frame-Options` and CSP `frame-ancestors` are omitted so the page can be embedded into third-party systems via iframe. Deployment-level protection is an operator concern, layered in front of the controller.
+
+## Go client
+
+The root package (`import "github.com/yankeguo/ironhive"`) wraps the controller API and, through its reverse proxy, the agent API. `Allocate` returns a `Sandbox` handle carrying the pod name; renew, release and every agent call hang off it:
+
+```go
+c := ironhive.NewClient("http://ironhive-controller:8080")
+sb, err := c.Allocate(ctx, "default", 5*time.Minute)
+if err != nil { /* handle */ }
+defer sb.Release(ctx)
+
+_ = sb.PutFile(ctx, "/tmp/input.txt", strings.NewReader("data"), nil)
+err = sb.Shell(ctx, "wc -l /tmp/input.txt", nil, func(ev ironhive.ShellEvent) error {
+	// ev.Type: stdout / stderr / exit / cwd / env
+	return nil
+})
+```
+
+Controller-level calls (`Renew`, `Release`, `Pools`) exist on `Client` too; `Sandbox.AgentDo` is the low-level escape hatch for anything the convenience methods (file / tar / dir / shell) don't cover. Requests carry no client-side timeout — deadlines belong to the caller's context, matching the controller/agent philosophy. Non-2xx responses decode into `*ironhive.Error` from the `{"message": ...}` envelope.
 
 ## ironhive-agent
 
