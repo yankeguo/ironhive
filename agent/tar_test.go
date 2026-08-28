@@ -143,6 +143,61 @@ func TestTarPutErrors(t *testing.T) {
 	}
 }
 
+func TestTarPutFromURL(t *testing.T) {
+	body := buildTar(t, []tarEntry{
+		{name: "sub", typ: tar.TypeDir, mode: 0o755},
+		{name: "sub/nested.txt", typ: tar.TypeReg, mode: 0o600, body: "nested"},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body.Bytes())
+	}))
+	defer srv.Close()
+	dest := filepath.Join(t.TempDir(), "out")
+	req := httptest.NewRequest(http.MethodPut,
+		"/v1/tar?path="+url.QueryEscape(dest)+"&url="+url.QueryEscape(srv.URL+"/x.tar"), nil)
+	rec := httptest.NewRecorder()
+	TarPutHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dest, "sub", "nested.txt")); string(data) != "nested" {
+		t.Fatalf("content = %q", data)
+	}
+}
+
+func TestTarPutFromURLErrors(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "out")
+	putURL := func(target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut,
+			"/v1/tar?path="+url.QueryEscape(dest)+"&url="+url.QueryEscape(target), nil)
+		rec := httptest.NewRecorder()
+		TarPutHandler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := putURL("ftp://example.com/x.tar"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-http url: status = %d, want 400", rec.Code)
+	}
+	if rec := putURL("http://127.0.0.1:1/x.tar"); rec.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable url: status = %d, want 502", rec.Code)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	if rec := putURL(srv.URL); rec.Code != http.StatusBadGateway {
+		t.Fatalf("non-200 upstream: status = %d, want 502", rec.Code)
+	}
+	// A garbage tar stream from the URL is still a 400, not a 500.
+	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not a tar"))
+	}))
+	defer garbage.Close()
+	if rec := putURL(garbage.URL); rec.Code != http.StatusBadRequest {
+		t.Fatalf("garbage tar from url: status = %d, want 400", rec.Code)
+	}
+}
+
 func TestTarGetRoundtrip(t *testing.T) {
 	// Build a source tree.
 	src := t.TempDir()

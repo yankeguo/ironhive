@@ -133,9 +133,8 @@ func FilesPutHandler() http.HandlerFunc {
 		}
 		rawURL := q.Get("url")
 		if rawURL != "" {
-			u, err := url.Parse(rawURL)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				http.Error(w, "invalid url: must be an absolute http(s) URL", http.StatusBadRequest)
+			if err := validatePutURL(rawURL); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
@@ -145,25 +144,11 @@ func FilesPutHandler() http.HandlerFunc {
 		}
 		defer unlock()
 		// The content source is the request body, unless url is given.
-		src := r.Body
-		if rawURL != "" {
-			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
-			if err != nil {
-				http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
-				return
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				http.Error(w, "download: "+resp.Status, http.StatusBadGateway)
-				return
-			}
-			src = resp.Body
+		src, ok := putSource(w, r, rawURL)
+		if !ok {
+			return
 		}
+		defer src.Close()
 		// Parent directories are created automatically, like mkdir -p.
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -216,6 +201,41 @@ func FilesPutHandler() http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("OK"))
 	}
+}
+
+// validatePutURL checks that rawURL is an absolute http(s) URL.
+func validatePutURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid url: must be an absolute http(s) URL")
+	}
+	return nil
+}
+
+// putSource returns the content source for a PUT request: the request
+// body, or when rawURL is non-empty the body of a GET to that URL. On
+// failure it writes the error response and returns ok == false. The
+// caller must close the returned reader.
+func putSource(w http.ResponseWriter, r *http.Request, rawURL string) (src io.ReadCloser, ok bool) {
+	if rawURL == "" {
+		return r.Body, true
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
+		return nil, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
+		return nil, false
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		http.Error(w, "download: "+resp.Status, http.StatusBadGateway)
+		return nil, false
+	}
+	return resp.Body, true
 }
 
 // parseChmod parses a zero-prefixed octal file mode, e.g. "0644".

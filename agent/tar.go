@@ -110,21 +110,35 @@ var errBadTar = errors.New("invalid tar archive")
 
 // TarPutHandler serves PUT /v1/tar?path=<dir>: the request body is an
 // uncompressed tar stream extracted into path (created if missing).
+// When the url query parameter is given, the body is expected to be
+// empty and the tar stream is downloaded from that http(s) URL instead.
 // Regular files and directories are supported; absolute entry names and
 // entries escaping the destination are rejected. Existing files are
 // overwritten; on a mid-archive error the files extracted so far remain.
 func TarPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		rawURL := r.URL.Query().Get("url")
+		if rawURL != "" {
+			if err := validatePutURL(rawURL); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		p, unlock, ok := requirePath(w, r)
 		if !ok {
 			return
 		}
 		defer unlock()
+		src, ok := putSource(w, r, rawURL)
+		if !ok {
+			return
+		}
+		defer src.Close()
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := extractTar(r.Body, p); err != nil {
+		if err := extractTar(src, p); err != nil {
 			if errors.Is(err, errBadTar) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 			} else {
