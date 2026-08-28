@@ -184,7 +184,7 @@ go build ./...
 
 ## Release
 
-`.github/workflows/release.yml` runs the full frontend and Go quality suite for pull requests and pushes. On `main` / tag pushes only, a successful quality job builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
+`.github/workflows/release.yml` runs the full frontend and Go quality suite for pull requests and pushes. On `main` / tag pushes only, a successful quality job builds and pushes `ghcr.io/<owner>/<repo>` and `quay.io/<owner>/<repo>` (login via the `QUAY_USERNAME` / `QUAY_PASSWORD` action secrets) via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
 
 - push `main` → `controller-latest` / `agent-latest` and `controller-latest-<short_sha>` / `agent-latest-<short_sha>`
 - push a git tag → `controller-<tag>` / `agent-<tag>`

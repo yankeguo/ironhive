@@ -65,7 +65,7 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 
 - `config.yml` — annotated example pool config (`standby.static.count`, `podTemplate`; agent port derived from `podTemplate` container ports — `http-ironhive` wins, else the first, else 19173).
 - `manifest.yml` — full demo deployment in namespace `ironhive`: namespaced Role for the controller (pods get/list/watch/create/update/patch/delete, coordination.k8s.io leases, and events), ConfigMap with the controller config, 3-replica Deployment, Service.
-- `Dockerfile.controller` / `Dockerfile.agent` — multi-stage builds; images published as `ghcr.io/yankeguo/ironhive:{controller,agent}-*`.
+- `Dockerfile.controller` / `Dockerfile.agent` — multi-stage builds; images published as `ghcr.io/yankeguo/ironhive:{controller,agent}-*` and `quay.io/yankeguo/ironhive:{controller,agent}-*`.
 
 ## Scope discipline
 
