@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        component: [controller, runtime]
+        component: [controller, agent]
     permissions:
       contents: read
       packages: write

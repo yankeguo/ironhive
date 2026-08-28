@@ -14,7 +14,7 @@ Retro on the server, modern in the build:
 | Path | Role |
 |---|---|
 | `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`), graceful shutdown |
-| `cmd/ironhive-runtime/` | Runtime binary: agent running inside managed containers |
+| `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers |
 | `controller/` | Controller package: HTTP server, views, static assets |
 | `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
 | `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
@@ -22,13 +22,13 @@ Retro on the server, modern in the build:
 | `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
 | `controller/web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
 | `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
-| `runtime/` | Runtime package: agent logic for managed containers, PID 1 zombie reaping |
+| `agent/` | Agent package: agent logic for managed containers, PID 1 zombie reaping |
 
-## ironhive-runtime
+## ironhive-agent
 
-`ironhive-runtime` is the agent running as the main process inside managed containers. Flags: `-listen` / `IHR_LISTEN` (default `:19173`).
+`ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` / `IHA_LISTEN` (default `:19173`).
 
-As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so the image needs no tini — `Dockerfile.runtime` uses the binary directly as `ENTRYPOINT`.
+As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so the image needs no tini — `Dockerfile.agent` uses the binary directly as `ENTRYPOINT`.
 
 ### API
 
@@ -79,17 +79,17 @@ go run ./cmd/ironhive-controller
 ```bash
 (cd controller/web && bun run typecheck && bun run build)
 go test ./...
-go build ./cmd/ironhive-controller ./cmd/ironhive-runtime
+go build ./cmd/ironhive-controller ./cmd/ironhive-agent
 ```
 
 `controller/web/dist` is git-ignored (only `.gitkeep` is committed), so always run the frontend build before `go build` — in Docker, do it in an `oven/bun` stage.
 
 ## Release
 
-`.github/workflows/release.yml` builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile.controller` and `Dockerfile.runtime`, with tags prefixed by component:
+`.github/workflows/release.yml` builds and pushes `ghcr.io/<owner>/<repo>` via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
 
-- push `main` → `controller-latest` / `runtime-latest` and `controller-latest-<short_sha>` / `runtime-latest-<short_sha>`
-- push a git tag → `controller-<tag>` / `runtime-<tag>`
+- push `main` → `controller-latest` / `agent-latest` and `controller-latest-<short_sha>` / `agent-latest-<short_sha>`
+- push a git tag → `controller-<tag>` / `agent-<tag>`
 
 Note: the bun stage mirrors the repo layout (`WORKDIR /repo/controller/web`, `COPY controller/*.go /repo/controller/`) because `main.css`'s Tailwind `@source "../../../*.go"` resolves relative to the CSS file — without the Go files next to `web/`, the glob lands on the container root and the build hangs scanning the whole filesystem.
 

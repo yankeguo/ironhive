@@ -8,7 +8,7 @@
 *.so
 *.dylib
 /ironhive-controller
-/ironhive-runtime
+/ironhive-agent
 
 # Test binary, built with `go test -c`
 *.test

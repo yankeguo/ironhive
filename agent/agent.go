@@ -1,6 +1,6 @@
-// Package runtime is the agent running inside containers managed by the
+// Package agent is the agent running inside containers managed by the
 // controller; it doubles as the container's init (PID 1).
-package runtime
+package agent
 
 import (
 	"log"
@@ -10,7 +10,7 @@ import (
 )
 
 // ReapZombies starts a SIGCHLD-driven reaper that waits on dead children,
-// preventing zombie processes from accumulating when ironhive-runtime runs
+// preventing zombie processes from accumulating when ironhive-agent runs
 // as PID 1 inside a container: orphaned grandchildren are reparented to
 // PID 1, and only PID 1 can reap them.
 //

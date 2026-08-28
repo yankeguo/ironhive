@@ -11,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yankeguo/ironhive/runtime"
+	"github.com/yankeguo/ironhive/agent"
 )
 
 func main() {
-	runtime.ReapZombies()
+	agent.ReapZombies()
 
-	listen := envOr("IHR_LISTEN", ":19173")
+	listen := envOr("IHA_LISTEN", ":19173")
 	flag.StringVar(&listen, "listen", listen, "http listen address")
 	flag.Parse()
 
@@ -26,13 +26,13 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("GET /v1/file", runtime.FilesGetHandler())
-	mux.HandleFunc("PUT /v1/file", runtime.FilesPutHandler())
-	mux.HandleFunc("GET /v1/tar", runtime.TarGetHandler())
-	mux.HandleFunc("PUT /v1/tar", runtime.TarPutHandler())
-	mux.HandleFunc("GET /v1/dir", runtime.DirGetHandler())
-	mux.HandleFunc("PUT /v1/dir", runtime.DirPutHandler())
-	mux.HandleFunc("POST /v1/shell", runtime.ShellPostHandler())
+	mux.HandleFunc("GET /v1/file", agent.FilesGetHandler())
+	mux.HandleFunc("PUT /v1/file", agent.FilesPutHandler())
+	mux.HandleFunc("GET /v1/tar", agent.TarGetHandler())
+	mux.HandleFunc("PUT /v1/tar", agent.TarPutHandler())
+	mux.HandleFunc("GET /v1/dir", agent.DirGetHandler())
+	mux.HandleFunc("PUT /v1/dir", agent.DirPutHandler())
+	mux.HandleFunc("POST /v1/shell", agent.ShellPostHandler())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
