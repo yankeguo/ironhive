@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 )
@@ -25,6 +27,20 @@ const (
 	LabelPool      = "ironhive.dev/pool"
 
 	ManagedByValue = "ironhive-controller"
+)
+
+// AnnotationAllocated marks a pod as handed out to a client; its value is
+// the RFC3339 time of the allocation. The allocation fact lives on the pod
+// object itself, so it is shared across controller replicas and survives
+// controller restarts.
+const AnnotationAllocated = "ironhive.dev/allocated"
+
+// Errors returned by Allocate and Release, wrapped with context.
+var (
+	ErrUnknownPool         = errors.New("unknown pool")
+	ErrNoSandboxAvailable  = errors.New("no sandbox available")
+	ErrSandboxNotFound     = errors.New("sandbox not found")
+	ErrSandboxNotAllocated = errors.New("sandbox not allocated")
 )
 
 // podSelector selects exactly the pods this controller manages.
@@ -40,8 +56,13 @@ type PodState struct {
 	IP        string
 	Phase     corev1.PodPhase
 	Ready     bool // the pod's Ready condition
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// Allocated reports whether the pod has been handed out to a client.
+	Allocated bool
+	// ResourceVersion is the pod's last seen resourceVersion, used as the
+	// optimistic-concurrency precondition when claiming the pod.
+	ResourceVersion string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // PodManager keeps each pool's standby pods created and tracks all managed
@@ -189,10 +210,11 @@ func (m *PodManager) reconcile(ctx context.Context) {
 	var terminated []string
 	for _, p := range m.pods {
 		// A freshly created pod has an empty phase until the API server
-		// fills it in; count anything not terminated as active.
+		// fills it in; count anything not terminated as active — except
+		// allocated pods, which are in use and not standby capacity.
 		if p.Phase == corev1.PodSucceeded || p.Phase == corev1.PodFailed {
 			terminated = append(terminated, p.Name)
-		} else {
+		} else if !p.Allocated {
 			active[p.Pool]++
 		}
 	}
@@ -260,13 +282,119 @@ func podStateFrom(pod *corev1.Pod) *PodState {
 		}
 	}
 	return &PodState{
-		Name:      pod.Name,
-		Pool:      pod.Labels[LabelPool],
-		Namespace: pod.Namespace,
-		IP:        pod.Status.PodIP,
-		Phase:     pod.Status.Phase,
-		Ready:     ready,
-		CreatedAt: pod.CreationTimestamp.Time,
-		UpdatedAt: time.Now(),
+		Name:            pod.Name,
+		Pool:            pod.Labels[LabelPool],
+		Namespace:       pod.Namespace,
+		IP:              pod.Status.PodIP,
+		Phase:           pod.Status.Phase,
+		Ready:           ready,
+		Allocated:       pod.Annotations[AnnotationAllocated] != "",
+		ResourceVersion: pod.ResourceVersion,
+		CreatedAt:       pod.CreationTimestamp.Time,
+		UpdatedAt:       time.Now(),
 	}
+}
+
+// Lookup returns the in-memory state of one managed pod.
+func (m *PodManager) Lookup(name string) (PodState, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.pods[name]
+	if !ok {
+		return PodState{}, false
+	}
+	return *p, true
+}
+
+// Allocate claims one Ready standby pod of the pool for a client. When no
+// candidate is available it keeps polling the in-memory state until wait
+// elapses — reconcile tops the pool up in the meantime — and then returns
+// ErrNoSandboxAvailable. An unknown pool fails immediately.
+//
+// The claim is a patch carrying the pod's resourceVersion as an
+// optimistic-concurrency precondition, so racing controller replicas
+// cannot claim the same pod: the API server accepts exactly one of them.
+func (m *PodManager) Allocate(ctx context.Context, poolName string, wait time.Duration) (PodState, error) {
+	if _, ok := m.cfg.Pools[poolName]; !ok {
+		return PodState{}, fmt.Errorf("%w: %q", ErrUnknownPool, poolName)
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		for _, st := range m.candidates(poolName) {
+			claimed, err := m.claim(ctx, st)
+			if err == nil {
+				return claimed, nil
+			}
+			if ctx.Err() != nil {
+				return PodState{}, ctx.Err()
+			}
+			// Lost the race or a transient error — try the next one.
+		}
+		if time.Now().After(deadline) {
+			return PodState{}, fmt.Errorf("pool %q: %w", poolName, ErrNoSandboxAvailable)
+		}
+		select {
+		case <-ctx.Done():
+			return PodState{}, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// candidates lists the pool's claimable pods, sorted by name.
+func (m *PodManager) candidates(poolName string) []PodState {
+	var out []PodState
+	for _, p := range m.Pods() {
+		if p.Pool == poolName && !p.Allocated && p.Phase == corev1.PodRunning && p.Ready && p.IP != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// claim marks one pod allocated on the API server and mirrors the fact
+// into the in-memory state.
+func (m *PodManager) claim(ctx context.Context, st PodState) (PodState, error) {
+	patch := fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"annotations":{%q:%q}}}`,
+		st.ResourceVersion, AnnotationAllocated, time.Now().UTC().Format(time.RFC3339))
+	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, st.Name,
+		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		return PodState{}, err
+	}
+	claimed := podStateFrom(pod)
+	m.mu.Lock()
+	// The patch only touches metadata, so keep the freshest known runtime
+	// fields — the watch overwrites them with the server's truth anyway.
+	if prev, ok := m.pods[pod.Name]; ok {
+		claimed.IP = prev.IP
+		claimed.Phase = prev.Phase
+		claimed.Ready = prev.Ready
+	}
+	m.pods[pod.Name] = claimed
+	m.mu.Unlock()
+	log.Println("pod manager: allocated pod", pod.Name, "of pool", st.Pool)
+	return *claimed, nil
+}
+
+// Release destroys an allocated pod. Sandboxes are single-use: the pool is
+// topped up with a fresh pod by the next reconcile pass.
+func (m *PodManager) Release(ctx context.Context, name string) error {
+	m.mu.RLock()
+	st, ok := m.pods[name]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
+	}
+	if !st.Allocated {
+		return fmt.Errorf("%w: %q", ErrSandboxNotAllocated, name)
+	}
+	if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("delete pod %q: %w", name, err)
+	}
+	m.mu.Lock()
+	delete(m.pods, name)
+	m.mu.Unlock()
+	log.Println("pod manager: released pod", name)
+	return nil
 }

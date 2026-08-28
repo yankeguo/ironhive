@@ -55,8 +55,9 @@ func main() {
 
 	// The pod manager keeps standby pods warm; like the client and config
 	// it is best-effort — without either one the web UI still serves.
+	var pm *controller.PodManager
 	if kube != nil && cfg != nil {
-		pm := controller.NewPodManager(kube, namespace, cfg)
+		pm = controller.NewPodManager(kube, namespace, cfg)
 		go pm.Run(ctx)
 		log.Printf("pod manager started in namespace %s", namespace)
 	} else {
@@ -65,7 +66,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           controller.NewServer(kube, cfg).Handler(),
+		Handler:           controller.NewServer(kube, cfg, pm).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
