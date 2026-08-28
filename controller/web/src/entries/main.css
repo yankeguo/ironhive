@@ -2,9 +2,10 @@
    requests). Full import — preflight included. Scans the views, the TS
    entries (dynamic DOM classes), and the top-level Go files.
    NOTE: "../../../*.go" resolves relative to this CSS file, so builds must
-   keep web/ next to the top-level Go files — the Dockerfile mirrors this
-   layout (/repo/web + /repo/*.go). In a bare /web container the glob would
-   resolve to / and Tailwind would scan the whole filesystem (build hangs). */
+   keep web/ next to the controller Go files — the Dockerfile mirrors this
+   layout (/repo/controller/web + /repo/controller/*.go). In a bare /web
+   container the glob would resolve to / and Tailwind would scan the whole
+   filesystem (build hangs). */
 @import "tailwindcss";
 @plugin "@iconify/tailwind4";
 @source "../../view";

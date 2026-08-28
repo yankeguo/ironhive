@@ -52,8 +52,8 @@ type PoolConfig struct {
 	// PodTemplate is the Kubernetes pod template pods of this pool are
 	// created from, metadata and spec in the usual shape. Labels and
 	// annotations set here are merged with the controller's enforced
-	// management entries when a pod is created; setting them is allowed
-	// but rarely needed.
+	// management entries when a pod is created; controller-owned
+	// allocation annotations are stripped.
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 	// Agent describes the ironhive-agent endpoint inside each pod.
 	Agent PoolAgentConfig `json:"agent"`

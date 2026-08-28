@@ -13,11 +13,12 @@ Guidance for AI agents (and humans) working in this repository.
 ## Build, test, verify
 
 ```bash
-(cd controller/web && bun install && bun run build)   # required first: controller embeds web/dist
+(cd controller/web && bun install --frozen-lockfile && bun run typecheck && bun run build) # required first: controller embeds web/dist
 go build ./...
 go vet ./...
 go test ./...
-gofmt -l .                                             # must be empty; run gofmt -w on touched files
+go test -race ./...
+gofmt -l . # must be empty; run gofmt -w on touched files
 ```
 
 `controller/web/dist` is git-ignored — always run the bun build before `go build` or the embed fails. Run all of the above before declaring a change done. Do not commit or push unless the user asks.
@@ -35,10 +36,10 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 
 ### Kubernetes state model (controller)
 
-- Managed pods are named `sandbox-<lowercase ULID>` and carry enforced labels `app.kubernetes.io/managed-by=ironhive-controller` (list/watch selector), `ironhive.dev/pool=<pool>`, and `ironhive.dev/template-hash` (deterministic hash of the pool's `podTemplate`; standby pods with a stale hash are recycled by reconcile, allocated ones are left to their lease).
+- Managed pods are named `sandbox-<lowercase ULID>` and carry enforced labels `app.kubernetes.io/managed-by=ironhive-controller` (list/watch selector), `ironhive.dev/pool=<pool>`, and `ironhive.dev/template-hash` (deterministic hash of the pool's `podTemplate`; standby pods with a stale hash are recycled by reconcile, allocated ones are left to their lease). Controller-owned allocation annotations are stripped from new pod templates.
 - **The pod object is the source of truth.** Allocation is the `ironhive.dev/allocated` annotation, claimed with a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition — claims stay correct on every replica, no election needed on the allocate path. Leases live there too: `ironhive.dev/lease-expires` (RFC3339), set at allocate time, extended by `POST /controller/v1/renew`, reaped by reconcile.
-- **Reconcile is single-writer via leader election** (`controller/leader.go`, a `coordination.k8s.io` Lease named `ironhive-controller`): only the leader runs the reconcile loop — top-up, sweeps, template-hash recycling — so pool sizing is strongly consistent and nothing is over-created. The watch loop and allocate/renew/release run on all replicas.
-- In-memory state (`PodManager.pods`) is a watch-fed cache for fast reads; it must always be able to reconverge from a fresh list.
+- **Reconcile is single-writer via leader election** (`controller/leader.go`, a `coordination.k8s.io` Lease named `ironhive-controller`): only a replica with an initially synced cache can lead, and only the leader runs exact sizing, sweeps, and template-hash recycling. Deletes carry the classified pod's `resourceVersion`, so concurrent allocate/renew wins. The watch loop and allocate/renew/release run on all replicas.
+- In-memory state (`PodManager.pods`) is a watch-fed cache for fast reads; it must always be able to reconverge from a fresh list. Terminating and stale-template pods are never allocation candidates.
 - Sandboxes are single-use: release or lease expiry means delete the pod; reconcile tops the pool up. Do not return used pods to the standby pool.
 - The dashboard and `GET /controller/v1/pools` are read-only, unauthenticated, and frameable on purpose (no `X-Frame-Options`, no CSP `frame-ancestors`) — embedding into third-party systems is a feature; access control is layered in front at deployment time.
 - Everything is best-effort with log-and-retry: failed creates/deletes are retried on the next reconcile pass; missing config or missing cluster disables the pod manager but never the web UI.
