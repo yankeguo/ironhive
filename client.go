@@ -87,6 +87,7 @@ type PodInfo struct {
 	Phase        string    `json:"phase"`
 	Ready        bool      `json:"ready"`
 	IP           string    `json:"ip"`
+	Deleting     bool      `json:"deleting"`
 	Allocated    bool      `json:"allocated"`
 	LeaseExpires time.Time `json:"leaseExpires"`
 	CreatedAt    time.Time `json:"createdAt"`

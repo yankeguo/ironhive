@@ -64,7 +64,7 @@ func fakeController(t *testing.T) *httptest.Server {
 			Pools: []PoolSummary{{Name: "default", Standby: 2, Pending: 1, Allocated: 1}},
 			Pods: []PodInfo{{
 				Name: "sandbox-01m13test", Pool: "default", Phase: "Running",
-				Ready: true, IP: "10.0.0.7", Allocated: true,
+				Ready: true, IP: "10.0.0.7", Deleting: true, Allocated: true,
 				LeaseExpires: time.Now().Add(5 * time.Minute).UTC().Truncate(time.Second),
 				CreatedAt:    time.Now().UTC().Truncate(time.Second),
 			}},
@@ -185,7 +185,7 @@ func TestControllerEndpoints(t *testing.T) {
 	if len(state.Pools) != 1 || state.Pools[0].Standby != 2 || state.Pools[0].Allocated != 1 {
 		t.Fatalf("pools = %+v", state.Pools)
 	}
-	if len(state.Pods) != 1 || state.Pods[0].Name != "sandbox-01m13test" {
+	if len(state.Pods) != 1 || state.Pods[0].Name != "sandbox-01m13test" || !state.Pods[0].Deleting {
 		t.Fatalf("pods = %+v", state.Pods)
 	}
 }
