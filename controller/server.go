@@ -13,10 +13,12 @@ type Server struct {
 	// Kubernetes is the client for the cluster hosting the managed
 	// containers; nil when no credentials were resolvable at startup.
 	Kubernetes kubernetes.Interface
+	// Config is the loaded config.yml; nil when no config file was found.
+	Config *Config
 }
 
-func NewServer(kube kubernetes.Interface) *Server {
-	return &Server{Kubernetes: kube}
+func NewServer(kube kubernetes.Interface, cfg *Config) *Server {
+	return &Server{Kubernetes: kube, Config: cfg}
 }
 
 func (s *Server) Handler() http.Handler {

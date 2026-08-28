@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,10 +18,26 @@ import (
 func main() {
 	listen := envOr("IHC_LISTEN", ":8080")
 	kubeconfig := envOr("IHC_KUBECONFIG", "")
+	config := envOr("IHC_CONFIG", "config.yml")
 	flag.StringVar(&listen, "listen", listen, "http listen address")
 	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig,
 		"kubeconfig path; defaults to the standard loading rules, with in-cluster config as fallback")
+	flag.StringVar(&config, "config", config, "config file path")
 	flag.Parse()
+
+	// The config file is optional while nothing consumes it yet: absent is
+	// fine, present but invalid is a hard failure — misconfiguration must
+	// not boot silently.
+	cfg, err := controller.LoadConfig(config)
+	switch {
+	case err == nil:
+		log.Printf("config loaded from %s: %d pool(s)", config, len(cfg.Pools))
+	case errors.Is(err, fs.ErrNotExist):
+		log.Println("no config file at", config, "— running without pools")
+	default:
+		log.Println("config:", err)
+		os.Exit(1)
+	}
 
 	// The Kubernetes client is best-effort at startup: without it the web
 	// UI still serves, and the absence is loud in the logs.
@@ -36,7 +53,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           controller.NewServer(kube).Handler(),
+		Handler:           controller.NewServer(kube, cfg).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

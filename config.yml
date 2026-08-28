@@ -1,0 +1,41 @@
+# ironhive controller configuration.
+#
+# pools.<name>            — a named pool of managed containers
+#   .standby.static.count — warm pods kept ready to assign (default 10)
+#   .podTemplate          — Kubernetes pod template the pool's pods are
+#                           created from; labels and annotations may be
+#                           set but are rarely needed — the controller
+#                           merges them with its own enforced entries
+#   .agent.port           — port ironhive-agent listens on in the pod
+#                           (default 19173)
+pools:
+  default:
+    standby:
+      static:
+        count: 10
+    podTemplate:
+      spec:
+        # Boot an arbitrary user image under ironhive-agent: the init
+        # container copies the agent binary from the agent image into a
+        # shared emptyDir, and the main container's entrypoint is
+        # replaced with that copy — the agent becomes PID 1, no
+        # arguments needed (IHA_LISTEN defaults to :19173).
+        volumes:
+          - name: ironhive-bin
+            emptyDir: {}
+        initContainers:
+          - name: install-agent
+            image: ghcr.io/yankeguo/ironhive:agent-latest
+            command: ["/bin/sh", "-c", "cp /ironhive-agent /.ironhive/bin/ironhive-agent"]
+            volumeMounts:
+              - name: ironhive-bin
+                mountPath: /.ironhive/bin
+        containers:
+          - name: main
+            image: python:3.14
+            command: ["/.ironhive/bin/ironhive-agent"]
+            volumeMounts:
+              - name: ironhive-bin
+                mountPath: /.ironhive/bin
+    agent:
+      port: 19173

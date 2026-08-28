@@ -13,11 +13,13 @@ Retro on the server, modern in the build:
 
 | Path | Role |
 |---|---|
-| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`; `-kubeconfig` / `IHC_KUBECONFIG`), graceful shutdown |
+| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`; `-kubeconfig` / `IHC_KUBECONFIG`; `-config` / `IHC_CONFIG`, default `config.yml`), graceful shutdown |
 | `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers |
 | `controller/` | Controller package: HTTP server, views, static assets |
 | `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
 | `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback |
+| `controller/config.go` | `config.yml` loading: `pools.<name>` with `standby.static.count` (default 10), `podTemplate` (`corev1.PodTemplateSpec`), `agent.port` (default 19173) |
+| `config.yml` | Example controller configuration with one `default` pool |
 | `deploy/rbac.yaml` | Example RBAC: ServiceAccount + Role (pods get/list/watch/create/update/patch/delete) in the `ironhive` namespace |
 | `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
 | `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
@@ -28,7 +30,9 @@ Retro on the server, modern in the build:
 
 ## ironhive-controller
 
-`ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. Flags: `-listen` / `IHC_LISTEN` (default `:8080`), `-kubeconfig` / `IHC_KUBECONFIG`.
+`ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. Flags: `-listen` / `IHC_LISTEN` (default `:8080`), `-kubeconfig` / `IHC_KUBECONFIG`, `-config` / `IHC_CONFIG` (default `config.yml`).
+
+The config file declares container pools: `pools.<name>.standby.static.count` (warm pods kept ready, default 10), `pools.<name>.podTemplate` (a full Kubernetes pod template, parsed as `corev1.PodTemplateSpec`), and `pools.<name>.agent.port` (the agent's listen port inside the pod, default 19173). See the annotated `config.yml` in the repo root. An absent config file is tolerated while nothing consumes pools; a present-but-invalid one fails startup.
 
 Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
 
