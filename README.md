@@ -93,7 +93,7 @@ Controller-level calls (`Renew`, `Release`, `Pools`) exist on `Client` too; `San
 
 `ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` (default `:19173`) — command line only, no environment variables.
 
-As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — `Dockerfile.agent` uses the binary directly as `ENTRYPOINT`. Shell PIDs are registered as owned by `exec.Cmd`; the SIGCHLD reaper validates that procfs belongs to its PID namespace, enumerates direct children, and calls targeted `wait4(pid)` only for adopted orphans, so it cannot steal a shell's exit status. If procfs is unavailable, the conservative fallback waits for arbitrary children only while no managed shell is active.
+As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — and `Dockerfile.agent` (a minimal busybox image) ships no `ENTRYPOINT` at all: it is only used as an initContainer that copies the binary into a shared `emptyDir`, from which the sandbox's main container launches it (see `config.yml`). Shell PIDs are registered as owned by `exec.Cmd`; the SIGCHLD reaper validates that procfs belongs to its PID namespace, enumerates direct children, and calls targeted `wait4(pid)` only for adopted orphans, so it cannot steal a shell's exit status. If procfs is unavailable, the conservative fallback waits for arbitrary children only while no managed shell is active.
 
 ### API
 

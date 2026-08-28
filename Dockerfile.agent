@@ -4,11 +4,9 @@ WORKDIR /go/src/app
 COPY . .
 RUN go build -trimpath -ldflags="-s -w" -o /ironhive-agent ./cmd/ironhive-agent
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-	ca-certificates \
-	&& rm -rf /var/lib/apt/lists/*
+FROM busybox:latest
 COPY --from=builder /ironhive-agent /ironhive-agent
-EXPOSE 19173
-# ironhive-agent acts as PID 1 itself (zombie reaping), no tini needed.
-ENTRYPOINT ["/ironhive-agent", "-listen", ":19173"]
+# This image is not meant to run a workload itself: it is used as an
+# initContainer that copies /ironhive-agent into a shared emptyDir (see
+# config.yml), so it intentionally has no ENTRYPOINT — only the static
+# binary and busybox's shell for the copy command.
