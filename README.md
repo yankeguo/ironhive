@@ -43,7 +43,7 @@ As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so t
 | `POST /v1/tar/upload?path=&url=` | Pack the directory at `path` as an uncompressed tar stream (same archive as `GET /v1/tar`, honoring the same repeatable `include=` / `exclude=` filters) and stream it as the request body to `url` with `Content-Type: application/x-tar`. `method=` / `headers=` behave as in `POST /v1/file/upload`; the upload uses chunked encoding since the stream length is unknown upfront. A non-2xx upstream response is reported as `502` |
 | `GET /v1/dir?path=` | List a directory as a JSON array of `{name, dir, size, mode, mtime}`, sorted by name (`mode` is zero-prefixed octal, `mtime` RFC3339) |
 | `PUT /v1/dir?path=` | Create a directory like `mkdir -p`. Optional `chmod` / `chown`, same syntax as `PUT /v1/file` (default mode `0755`) |
-| `POST /v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below) |
+| `POST /v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below). Optional form fields: `cwd` (working directory; absolute or relative to the process working directory), repeatable `env` (`KEY=VALUE` entries), and `strict_env` (boolean; see below). Calls are stateless and run concurrently |
 
 File operations on the same absolute path are serialized with a per-path mutex.
 
@@ -51,9 +51,14 @@ Endpoints that do not return data answer with a JSON envelope `{"message": ...}`
 
 ### Shell sessions
 
-`POST /v1/shell` runs each command embedded in a bash wrapper that restores the previous call's environment and working directory from on-disk snapshots (`$TMPDIR/ironhive-shell/{env,pwd}`) and saves them again on exit via `trap` — so `cd` and `export` carry over between calls without a long-lived shell. The initial working directory is the process cwd. Calls are serialized because they share the state files.
+`POST /v1/shell` runs each command in a fresh bash — calls share nothing and run concurrently. The optional `cwd` field sets the working directory for that call only. The command's environment is assembled from two inputs:
 
-The response is `text/event-stream`; `data` is a JSON-encoded string:
+- the repeatable `env` field (`KEY=VALUE` entries), and
+- unless `strict_env=true`, a curated subset of the process environment — generic vars like `PATH` / `HOME` / `USER` / `LANG` / `LC_*` / `TERM` / `TZ` / `TMPDIR`, with platform-injected vars (Kubernetes `*_SERVICE_HOST` / `*_SERVICE_PORT`, credentials, pod metadata) deliberately dropped so sandboxed commands cannot observe their environment. With `strict_env=true` the command environment is exactly the `env` entries.
+
+After the command exits, an EXIT trap snapshots its final pwd and environment, reported back as `cwd` / `env` events. The intended loop for the upstream harness: make the first call without `strict_env` and let the agent assemble a sane environment; read the reported `cwd` / `env`; then feed them back with `strict_env=true` on subsequent calls — from then on the session state is fully owned by the harness, with no dependence on the process environment.
+
+The response is `text/event-stream`; `data` is JSON-encoded:
 
 ```
 event: stdout
@@ -64,9 +69,15 @@ data: "something failed"
 
 event: exit
 data: "0"
+
+event: cwd
+data: "/app"
+
+event: env
+data: {"HOME":"/root","PATH":"/usr/bin", ...}
 ```
 
-One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code.
+One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code, then the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
 
 If the client disconnects, the command's whole **process group** (bash plus any pipeline or subshell children) receives `SIGTERM` — the wrapper's `EXIT` trap still saves the state snapshot — and the process is `SIGKILL`ed after a 5-second grace period. Disconnecting is therefore a reliable cancel; a command whose descendants ignore `SIGTERM` may leave orphans behind, which are reparented to PID 1 and reaped when they eventually die.
 
@@ -77,7 +88,7 @@ The agent is deliberately low-level; the harness (timeouts, budget enforcement, 
 - **Cancel / timeout** — close the connection. There is no server-side timeout by design; the upstream enforces its own deadline and disconnects, which triggers the teardown described above.
 - **Output capping** — read until you have enough, then disconnect. The agent streams unbounded output line by line and never truncates; the upstream decides when a command has said enough.
 - **Background processes** — `nohup cmd &` (or plain `cmd &`) works: the handler does not hang on backgrounded grandchildren holding the output pipes open, and re-parented orphans are reaped by PID 1. Job tracking, if wanted, is upstream bookkeeping.
-- **Serialized shell** — one command at a time (calls share the on-disk state snapshot); a long-running foreground command blocks every later call. Background long-lived processes (dev servers, watchers) instead of waiting on them.
+- **Session composition** — shell calls are stateless and parallel; the `cwd`/`env` events at the end of each stream report the command's final state, and the `cwd`/`env` form fields (plus `strict_env=true`) seed the next call. The harness decides whether calls share a session, fork one, or stay independent — LLMs tend to assume state persists between calls, and this is the mechanism to honor that assumption where wanted.
 - **No size or time limits anywhere** — uploads, downloads and tar streams are unbounded. Quotas and limits are upstream or deployment concerns.
 - **Security model** — these endpoints are unauthenticated remote code execution by design. The container network must isolate the agent so that only the controller can reach it; never publish the port.
 

@@ -12,63 +12,123 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-// shellMu serializes shell executions: all invocations share the on-disk
-// pwd/env state, so concurrent commands would race on it.
-var shellMu sync.Mutex
+// envAllowlist is the set of process environment variables inherited by
+// shell commands when strict_env is false. Only generic, portable vars are
+// kept; platform-injected vars (Kubernetes `*_SERVICE_HOST` /
+// `*_SERVICE_PORT`, cloud credentials, pod metadata, ...) are dropped so
+// sandboxed commands cannot observe their environment. LC_* locale vars
+// are kept by prefix, see curatedEnv.
+var envAllowlist = map[string]bool{
+	"PATH":    true,
+	"HOME":    true,
+	"USER":    true,
+	"LOGNAME": true,
+	"SHELL":   true,
+	"LANG":    true,
+	"TERM":    true,
+	"TZ":      true,
+	"TMPDIR":  true,
+}
 
-// shellState resolves the on-disk state file paths once per process. The
-// wrapper script snapshots pwd and exported env into these files on exit
-// and restores them before running the next command, giving cd/export
-// persistence across calls without a long-lived shell.
-var shellState = sync.OnceValues(func() (paths struct{ env, pwd string }, err error) {
-	dir := filepath.Join(os.TempDir(), "ironhive-shell")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return paths, err
+// curatedEnv filters base down to the allowlisted generic vars.
+func curatedEnv(base []string) []string {
+	var out []string
+	for _, e := range base {
+		k, _, _ := strings.Cut(e, "=")
+		if envAllowlist[k] || strings.HasPrefix(k, "LC_") {
+			out = append(out, e)
+		}
 	}
-	paths.env = filepath.Join(dir, "env")
-	paths.pwd = filepath.Join(dir, "pwd")
-	return paths, nil
-})
+	return out
+}
 
-// buildShellWrapper embeds command (verbatim, as bash code) into a wrapper
-// that restores the previous call's env and cwd first, and snapshots them
-// back on exit. State file paths travel via env vars, not string
-// interpolation, to avoid path injection.
-func buildShellWrapper(command string) string {
-	return `trap 'pwd > "$IHR_SHELL_STATE_PWD" 2>/dev/null; env -0 > "$IHR_SHELL_STATE_ENV" 2>/dev/null' EXIT
-if [ -f "$IHR_SHELL_STATE_ENV" ]; then
-  while IFS= read -r -d '' __kv; do export "$__kv"; done < "$IHR_SHELL_STATE_ENV"
-fi
-if [ -f "$IHR_SHELL_STATE_PWD" ]; then
-  cd "$(cat "$IHR_SHELL_STATE_PWD")" 2>/dev/null || true
-fi
-unset __kv
+// buildShellWrapper wraps command with an EXIT trap that snapshots the
+// final pwd and exported env into envPath/pwdPath, which the handler
+// reports back as SSE events. The trap runs on normal exit and on SIGTERM
+// cancel, but not when WaitDelay escalates to SIGKILL — in that case no
+// state is reported. The paths are agent-generated (os.MkdirTemp) and
+// embedded via shellQuote — adjacent single-quoted segments concatenate,
+// so nothing in the trap argument is ever expanded, at definition or at
+// run time; no shell variable or env entry carries them, so the command
+// cannot see or tamper with them.
+func buildShellWrapper(command, envPath, pwdPath string) string {
+	return "trap 'pwd > " + shellQuote(pwdPath) + " 2>/dev/null; env -0 > " + shellQuote(envPath) + ` 2>/dev/null' EXIT
 ` + command
 }
 
-// ShellPostHandler serves POST /v1/shell with form field "command". The
-// command runs via bash in a wrapper that carries cwd and exported env
-// over from the previous call (initial cwd is the process working
-// directory). Output streams back as server-sent events:
+// shellQuote renders s as a single-quoted shell literal, safe to embed in
+// bash code.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ShellPostHandler serves POST /v1/shell, running the form field "command"
+// via bash. The shell is stateless: every call starts from the process
+// working directory and environment, unless overridden by form fields:
+//
+//	cwd — working directory; absolute, or relative to the process working
+//	      directory. Must be an existing directory.
+//	env — repeatable KEY=VALUE entries for the command environment.
+//	strict_env — when true, the command environment is exactly the env
+//	      entries given; when false (default), they overlay a curated
+//	      subset of the process environment (see envAllowlist). The
+//	      intended loop: call without strict_env, read back the env
+//	      event, then pass it all back with strict_env=true.
+//
+// Output streams back as server-sent events:
 //
 //	event: stdout / stderr — data: <json string, one per output line>
-//	event: exit            — data: <exit code>
+//	event: exit            — data: <json string, exit code>
+//	event: cwd             — data: <json string, working directory after exit>
+//	event: env             — data: <json object, full environment after exit>
 //	event: error           — data: <json string> (spawn or stream failures)
 //
-// If the client disconnects, the command is terminated with SIGTERM (so
-// the wrapper's EXIT trap still saves the state snapshot) and killed
-// after a grace period.
+// The cwd/env events let the upstream harness thread state across calls:
+// it can feed the reported values back as the cwd/env fields of the next
+// call, composing sessions itself. They are absent when the command was
+// SIGKILLed before its EXIT trap ran. Calls are fully independent and run
+// concurrently.
+//
+// If the client disconnects, the command's process group is terminated
+// with SIGTERM (so the EXIT trap still runs) and SIGKILLed after a grace
+// period.
 func ShellPostHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		command := r.PostFormValue("command")
 		if command == "" {
 			writeError(w, "missing form field: command", http.StatusBadRequest)
 			return
+		}
+		cwd := r.PostFormValue("cwd")
+		if cwd != "" {
+			if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
+				writeError(w, "invalid cwd: not an existing directory: "+cwd, http.StatusBadRequest)
+				return
+			}
+		}
+		var env []string
+		for _, e := range r.PostForm["env"] {
+			k, _, found := strings.Cut(e, "=")
+			if !found || k == "" {
+				writeError(w, fmt.Sprintf("invalid env entry %q: must be KEY=VALUE", e), http.StatusBadRequest)
+				return
+			}
+			env = append(env, e)
+		}
+		strictEnv := false
+		if s := r.PostFormValue("strict_env"); s != "" {
+			b, err := strconv.ParseBool(s)
+			if err != nil {
+				writeError(w, "invalid strict_env: must be a boolean", http.StatusBadRequest)
+				return
+			}
+			strictEnv = b
 		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -78,19 +138,23 @@ func ShellPostHandler() http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 
-		shellMu.Lock()
-		defer shellMu.Unlock()
-
-		state, err := shellState()
+		// Per-call snapshot files: shells run concurrently, so nothing may
+		// be shared between calls.
+		stateDir, err := os.MkdirTemp("", "ironhive-shell-")
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		cmd := exec.CommandContext(r.Context(), "bash", "-c", buildShellWrapper(command))
+		defer os.RemoveAll(stateDir)
+		envPath := filepath.Join(stateDir, "env")
+		pwdPath := filepath.Join(stateDir, "pwd")
+
+		cmd := exec.CommandContext(r.Context(), "bash", "-c", buildShellWrapper(command, envPath, pwdPath))
+		cmd.Dir = cwd // empty means the process working directory
 		// Run bash in its own process group so a cancel can SIGTERM the
 		// whole tree (pipelines, subshells, `sleep`s), not just the bash
 		// wrapper. SIGTERM (not the default SIGKILL) lets bash run the
-		// EXIT trap that persists the pwd/env snapshot.
+		// EXIT trap that writes the pwd/env snapshot.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
 			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
@@ -105,10 +169,11 @@ func ShellPostHandler() http.HandlerFunc {
 		// outlive this, but are reparented to PID 1 and reaped when they
 		// eventually die.
 		cmd.WaitDelay = 5 * time.Second
-		cmd.Env = append(os.Environ(),
-			"IHR_SHELL_STATE_ENV="+state.env,
-			"IHR_SHELL_STATE_PWD="+state.pwd,
-		)
+		base := []string(nil)
+		if !strictEnv {
+			base = curatedEnv(os.Environ())
+		}
+		cmd.Env = applyEnvOverrides(base, env)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
@@ -145,10 +210,53 @@ func ShellPostHandler() http.HandlerFunc {
 		for ev := range events {
 			writeSSE(w, flusher, ev.event, ev.data)
 		}
+
+		// Report the post-command state, if the EXIT trap managed to
+		// snapshot it.
+		if data, err := os.ReadFile(pwdPath); err == nil {
+			writeSSE(w, flusher, "cwd", strings.TrimRight(string(data), "\n"))
+		}
+		if data, err := os.ReadFile(envPath); err == nil {
+			writeSSE(w, flusher, "env", parseEnvDump(data))
+		}
 	}
 }
 
-type sseEvent struct{ event, data string }
+// applyEnvOverrides returns base with each KEY=VALUE override applied,
+// replacing existing entries with the same key.
+func applyEnvOverrides(base, overrides []string) []string {
+	for _, o := range overrides {
+		k, _, _ := strings.Cut(o, "=")
+		prefix := k + "="
+		found := false
+		for i, e := range base {
+			if strings.HasPrefix(e, prefix) {
+				base[i] = o
+				found = true
+			}
+		}
+		if !found {
+			base = append(base, o)
+		}
+	}
+	return base
+}
+
+// parseEnvDump parses an `env -0` snapshot into a map.
+func parseEnvDump(data []byte) map[string]string {
+	env := map[string]string{}
+	for _, entry := range strings.Split(string(data), "\x00") {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			env[k] = v
+		}
+	}
+	return env
+}
+
+type sseEvent struct {
+	event string
+	data  any
+}
 
 // scanSSE forwards lines from rd as SSE events until EOF; scanner
 // failures (e.g. an overlong line) surface as error events, except the
@@ -181,7 +289,7 @@ func exitCode(err error) int {
 
 // writeSSE writes one event; data is JSON-encoded so arbitrary output
 // (newlines, quotes, binary-ish bytes) survives the SSE framing.
-func writeSSE(w io.Writer, f http.Flusher, event, data string) {
+func writeSSE(w io.Writer, f http.Flusher, event string, data any) {
 	payload, _ := json.Marshal(data)
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload)
 	f.Flush()
