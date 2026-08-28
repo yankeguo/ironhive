@@ -8,10 +8,112 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
+
+// tarFilter decides which slash-separated, archive-relative names are
+// packed or extracted. An empty include list matches everything; excludes
+// win over includes, and excluding a directory excludes everything
+// beneath it.
+type tarFilter struct {
+	include []string
+	exclude []string
+}
+
+// newTarFilter reads the repeatable include/exclude query parameters.
+// Patterns use path.Match syntax extended with "**", which matches zero
+// or more path segments (crossing directories).
+func newTarFilter(q url.Values) (*tarFilter, error) {
+	f := &tarFilter{}
+	for _, key := range []string{"include", "exclude"} {
+		for _, pat := range q[key] {
+			pat = strings.TrimSuffix(strings.TrimPrefix(pat, "./"), "/")
+			for _, seg := range strings.Split(pat, "/") {
+				if seg == "**" {
+					continue
+				}
+				if _, err := path.Match(seg, ""); err != nil {
+					return nil, fmt.Errorf("invalid %s pattern %q: %v", key, pat, err)
+				}
+			}
+			if key == "include" {
+				f.include = append(f.include, pat)
+			} else {
+				f.exclude = append(f.exclude, pat)
+			}
+		}
+	}
+	return f, nil
+}
+
+// excluded reports whether name or any of its ancestor directories
+// matches an exclude pattern.
+func (f *tarFilter) excluded(name string) bool {
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "./"), "/")
+	for _, pat := range f.exclude {
+		for n := name; ; {
+			if matchGlob(pat, n) {
+				return true
+			}
+			i := strings.LastIndex(n, "/")
+			if i < 0 {
+				break
+			}
+			n = n[:i]
+		}
+	}
+	return false
+}
+
+// included reports whether name passes the filter.
+func (f *tarFilter) included(name string) bool {
+	if f.excluded(name) {
+		return false
+	}
+	if len(f.include) == 0 {
+		return true
+	}
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "./"), "/")
+	for _, pat := range f.include {
+		if matchGlob(pat, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlob reports whether the slash-separated name matches pattern,
+// where a "**" segment matches zero or more name segments and every
+// other segment follows path.Match syntax.
+func matchGlob(pattern, name string) bool {
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(name, "/"))
+}
+
+func matchSegments(pat, name []string) bool {
+	for len(pat) > 0 {
+		if pat[0] == "**" {
+			for i := 0; i <= len(name); i++ {
+				if matchSegments(pat[1:], name[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(name) == 0 {
+			return false
+		}
+		ok, err := path.Match(pat[0], name[0])
+		if err != nil || !ok {
+			return false
+		}
+		pat, name = pat[1:], name[1:]
+	}
+	return len(name) == 0
+}
 
 // TarGetHandler serves GET /v1/tar?path=<dir>: the directory at path is
 // streamed back as an uncompressed tar archive attachment named
@@ -19,9 +121,18 @@ import (
 // the archive round-trips through PUT /v1/tar into any destination.
 // Directories and regular files are included with their modes and mtimes;
 // symlinks and other special files are skipped. path may be absolute, or
-// relative to the process working directory.
+// relative to the process working directory. The repeatable include and
+// exclude query parameters limit which entries are archived: patterns use
+// path.Match syntax extended with "**" (crossing directories), matched
+// against archive-relative names; excludes win, and excluding a directory
+// excludes its whole subtree.
 func TarGetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		filter, err := newTarFilter(r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		p, unlock, ok := requirePath(w, r)
 		if !ok {
 			return
@@ -46,14 +157,17 @@ func TarGetHandler() http.HandlerFunc {
 		// The status is already sent, so a mid-stream failure can only
 		// truncate the response.
 		tw := tar.NewWriter(w)
-		_ = writeDirToTar(tw, p)
+		_ = writeDirToTar(tw, p, filter)
 		_ = tw.Close()
 	}
 }
 
 // writeDirToTar walks root and writes its contents as tar entries named
-// relative to root.
-func writeDirToTar(tw *tar.Writer, root string) error {
+// relative to root, skipping entries rejected by filter. Excluded
+// directories are not descended into; directories not matching a
+// non-empty include list are still descended into, so matching files
+// beneath them are archived.
+func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -64,6 +178,17 @@ func writeDirToTar(tw *tar.Writer, root string) error {
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if filter.excluded(rel) {
+				return filepath.SkipDir
+			}
+			if !filter.included(rel) {
+				return nil
+			}
+		} else if !filter.included(rel) {
+			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -112,17 +237,26 @@ var errBadTar = errors.New("invalid tar archive")
 // uncompressed tar stream extracted into path (created if missing).
 // When the url query parameter is given, the body is expected to be
 // empty and the tar stream is downloaded from that http(s) URL instead.
-// Regular files and directories are supported; absolute entry names and
-// entries escaping the destination are rejected. Existing files are
-// overwritten; on a mid-archive error the files extracted so far remain.
+// The repeatable include and exclude query parameters limit which
+// entries are extracted, with the same pattern syntax as GET /v1/tar;
+// entries not passing the filter are skipped. Regular files and
+// directories are supported; absolute entry names and entries escaping
+// the destination are rejected. Existing files are overwritten; on a
+// mid-archive error the files extracted so far remain.
 func TarPutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rawURL := r.URL.Query().Get("url")
+		q := r.URL.Query()
+		rawURL := q.Get("url")
 		if rawURL != "" {
 			if err := validatePutURL(rawURL); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+		}
+		filter, err := newTarFilter(q)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		p, unlock, ok := requirePath(w, r)
 		if !ok {
@@ -138,7 +272,7 @@ func TarPutHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := extractTar(src, p); err != nil {
+		if err := extractTar(src, p, filter); err != nil {
 			if errors.Is(err, errBadTar) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 			} else {
@@ -151,7 +285,7 @@ func TarPutHandler() http.HandlerFunc {
 	}
 }
 
-func extractTar(rd io.Reader, dest string) error {
+func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 	tr := tar.NewReader(rd)
 	for {
 		hdr, err := tr.Next()
@@ -167,10 +301,16 @@ func extractTar(rd io.Reader, dest string) error {
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			if !filter.included(hdr.Name) {
+				continue
+			}
 			if err := os.MkdirAll(target, tarPerm(hdr, 0o755)); err != nil {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
 			}
 		case tar.TypeReg, tar.TypeRegA:
+			if !filter.included(hdr.Name) {
+				continue
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
 			}

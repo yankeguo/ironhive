@@ -198,6 +198,167 @@ func TestTarPutFromURLErrors(t *testing.T) {
 	}
 }
 
+func TestMatchGlob(t *testing.T) {
+	cases := []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"*.txt", "a.txt", true},
+		{"*.txt", "sub/a.txt", false},   // '*' does not cross '/'
+		{"**/*.txt", "sub/a.txt", true}, // '**' crosses directories
+		{"**/*.txt", "a.txt", true},     // '**' matches zero segments
+		{"sub/**", "sub", true},
+		{"sub/**", "sub/a/b.txt", true},
+		{"sub/?/b.txt", "sub/x/b.txt", true},
+		{"sub/?/b.txt", "sub/x/y/b.txt", false},
+		{"a/**/c", "a/b/b/c", true},
+		{"a/**/c", "a/c", true},
+		{"a/**/c", "a/b/d", false},
+	}
+	for _, c := range cases {
+		if got := matchGlob(c.pattern, c.name); got != c.want {
+			t.Errorf("matchGlob(%q, %q) = %v, want %v", c.pattern, c.name, got, c.want)
+		}
+	}
+}
+
+// getTarEntries GETs the archive for src with extraQuery and returns the
+// archived entry names in order.
+func getTarEntries(t *testing.T, src, extraQuery string) []string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/tar?path="+url.QueryEscape(src)+extraQuery, nil)
+	rec := httptest.NewRecorder()
+	TarGetHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	var names []string
+	tr := tar.NewReader(rec.Body)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		names = append(names, hdr.Name)
+	}
+	return names
+}
+
+func writeTestTree(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "sub", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"top.txt":        "top",
+		"top.log":        "log",
+		"sub/nested.txt": "nested",
+		"sub/deep/d.txt": "deep",
+		"sub/deep/d.log": "deeplog",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestTarGetFilter(t *testing.T) {
+	src := t.TempDir()
+	writeTestTree(t, src)
+
+	// include only: '**/*.txt' reaches nested files, and non-matching
+	// directories are descended into but not archived themselves.
+	got := getTarEntries(t, src, "&include="+url.QueryEscape("**/*.txt"))
+	want := []string{"sub/deep/d.txt", "sub/nested.txt", "top.txt"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("include: entries = %v, want %v", got, want)
+	}
+
+	// Multiple include patterns are OR-ed.
+	got = getTarEntries(t, src,
+		"&include="+url.QueryEscape("*.log")+"&include="+url.QueryEscape("sub/**"))
+	want = []string{"sub/", "sub/deep/", "sub/deep/d.log", "sub/deep/d.txt", "sub/nested.txt", "top.log"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("multi-include: entries = %v, want %v", got, want)
+	}
+
+	// exclude drops a whole directory subtree.
+	got = getTarEntries(t, src, "&exclude="+url.QueryEscape("sub/deep"))
+	want = []string{"sub/", "sub/nested.txt", "top.log", "top.txt"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("exclude subtree: entries = %v, want %v", got, want)
+	}
+
+	// exclude wins over include.
+	got = getTarEntries(t, src,
+		"&include="+url.QueryEscape("**")+"&exclude="+url.QueryEscape("**/*.log"))
+	want = []string{"sub/", "sub/deep/", "sub/deep/d.txt", "sub/nested.txt", "top.txt"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("exclude wins: entries = %v, want %v", got, want)
+	}
+
+	// A bad pattern is a 400.
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/tar?path="+url.QueryEscape(src)+"&include="+url.QueryEscape("[bad"), nil)
+	rec := httptest.NewRecorder()
+	TarGetHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad pattern: status = %d, want 400", rec.Code)
+	}
+}
+
+func putTarQuery(t *testing.T, path, extraQuery string, body *bytes.Buffer) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut,
+		"/v1/tar?path="+url.QueryEscape(path)+extraQuery, body)
+	rec := httptest.NewRecorder()
+	TarPutHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestTarPutFilter(t *testing.T) {
+	body := func() *bytes.Buffer {
+		return buildTar(t, []tarEntry{
+			{name: "sub", typ: tar.TypeDir, mode: 0o755},
+			{name: "sub/nested.txt", typ: tar.TypeReg, mode: 0o644, body: "nested"},
+			{name: "sub/skip.log", typ: tar.TypeReg, mode: 0o644, body: "log"},
+			{name: "top.txt", typ: tar.TypeReg, mode: 0o644, body: "top"},
+		})
+	}
+
+	// include limits which entries are extracted.
+	dest := filepath.Join(t.TempDir(), "out")
+	rec := putTarQuery(t, dest, "&include="+url.QueryEscape("**/*.txt"), body())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("include: status = %d (%s)", rec.Code, rec.Body)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dest, "sub", "nested.txt")); string(data) != "nested" {
+		t.Fatalf("nested.txt content = %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "sub", "skip.log")); !os.IsNotExist(err) {
+		t.Fatalf("skip.log should not be extracted: %v", err)
+	}
+
+	// exclude skips matching entries.
+	dest = filepath.Join(t.TempDir(), "out")
+	rec = putTarQuery(t, dest, "&exclude="+url.QueryEscape("**/*.log"), body())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exclude: status = %d (%s)", rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "sub", "skip.log")); !os.IsNotExist(err) {
+		t.Fatalf("skip.log should not be extracted: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dest, "top.txt")); string(data) != "top" {
+		t.Fatalf("top.txt content = %q", data)
+	}
+
+	// A bad pattern is a 400.
+	if rec := putTarQuery(t, dest, "&exclude="+url.QueryEscape("[bad"), body()); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad pattern: status = %d, want 400", rec.Code)
+	}
+}
+
 func TestTarGetRoundtrip(t *testing.T) {
 	// Build a source tree.
 	src := t.TempDir()
