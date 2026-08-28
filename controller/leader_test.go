@@ -2,16 +2,13 @@ package controller
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
-	ktesting "k8s.io/client-go/testing"
 )
 
 // shrinkLeaderTimings makes the election fast enough for tests.
@@ -108,20 +105,10 @@ func TestLeaderWaitsForInitialList(t *testing.T) {
 		},
 	}}
 	kube := fake.NewSimpleClientset(existing)
-	listStarted := make(chan struct{})
-	allowList := make(chan struct{})
-	var once sync.Once
-	kube.Fake.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
-		once.Do(func() { close(listStarted) })
-		<-allowList
-		return false, nil, nil
-	})
 	m := NewPodManager(kube, "ironhive", cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go m.Run(ctx)
-	<-listStarted
 	go m.RunLeaderElection(ctx)
 	time.Sleep(200 * time.Millisecond)
 	for _, action := range kube.Actions() {
@@ -129,7 +116,9 @@ func TestLeaderWaitsForInitialList(t *testing.T) {
 			t.Fatal("leader created a pod before the initial list completed")
 		}
 	}
-	close(allowList)
+	if _, err := m.list(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
