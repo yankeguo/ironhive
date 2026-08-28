@@ -1,0 +1,153 @@
+# Full demo deployment of ironhive, scoped to the ironhive namespace.
+#
+# Contents, in apply order:
+#   Namespace      — ironhive
+#   ServiceAccount — ironhive-controller; in-cluster pods authenticate as it
+#   Role/RoleBinding — pod get/list/watch/create/update/patch/delete plus
+#     coordination.k8s.io leases and events (leader election), nothing else
+#   ConfigMap      — the controller config (mounted at /etc/ironhive/config.yml)
+#   Deployment     — 3 controller replicas; reconcile is single-writer via
+#     leader election, allocate/renew/release run on every replica
+#   Service        — ClusterIP access to the controller HTTP port (web UI + API)
+#
+# Apply with: kubectl apply -f manifest.yml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ironhive
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election for the reconcile loop (single writer across replicas).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update"]
+  # Leader-change events recorded on the Lease object.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ironhive-controller
+subjects:
+  - kind: ServiceAccount
+    name: ironhive-controller
+    namespace: ironhive
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+data:
+  # The controller resolves in-cluster credentials automatically, so no
+  # kubernetes.kubeconfig is needed here. Structure mirrors the annotated
+  # config.yml in the repo root.
+  config.yml: |
+    http:
+      listen: ":8080"
+    kubernetes:
+      namespace: ironhive
+    pools:
+      default:
+        standby:
+          static:
+            count: 10
+        podTemplate:
+          spec:
+            volumes:
+              - name: ironhive-bin
+                emptyDir: {}
+            initContainers:
+              - name: install-agent
+                image: ghcr.io/yankeguo/ironhive:agent-latest
+                command: ["/bin/sh", "-c", "cp /ironhive-agent /.ironhive/bin/ironhive-agent"]
+                volumeMounts:
+                  - name: ironhive-bin
+                    mountPath: /.ironhive/bin
+            containers:
+              - name: main
+                image: python:3.14
+                command: ["/.ironhive/bin/ironhive-agent"]
+                args: ["-listen", ":19173"]
+                ports:
+                  - name: http-ironhive
+                    containerPort: 19173
+                readinessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: http-ironhive
+                volumeMounts:
+                  - name: ironhive-bin
+                    mountPath: /.ironhive/bin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+  labels:
+    app.kubernetes.io/name: ironhive-controller
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ironhive-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ironhive-controller
+    spec:
+      serviceAccountName: ironhive-controller
+      containers:
+        - name: controller
+          image: ghcr.io/yankeguo/ironhive:controller-latest
+          args: ["-config", "/etc/ironhive/config.yml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ironhive
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: ironhive-controller
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+spec:
+  selector:
+    app.kubernetes.io/name: ironhive-controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

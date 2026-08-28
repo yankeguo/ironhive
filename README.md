@@ -21,7 +21,7 @@ The controller's web UI is retro on the server, modern in the build:
 | `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback; namespace resolution |
 | `controller/config.go` | `config.yml` loading: sections `http` (`listen`, default `:8080`), `kubernetes` (`kubeconfig`, `namespace`), and `pools.<name>` with `standby.static.count` (default 10) and `podTemplate` (`corev1.PodTemplateSpec`; the agent port is derived from its container ports) |
 | `config.yml` | Example controller configuration with one `default` pool |
-| `deploy/rbac.yaml` | Example RBAC: ServiceAccount + namespaced Role for pods, leader-election leases and events |
+| `manifest.yml` | Full demo deployment: RBAC (ServiceAccount + namespaced Role for pods, leader-election leases and events), ConfigMap with the controller config, 3-replica Deployment, Service |
 | `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
 | `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
 | `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
@@ -38,7 +38,7 @@ The config file is organized in sections: `http.listen` (HTTP listen address, de
 
 Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
 
-For in-cluster operation, `deploy/rbac.yaml` is a ready-to-apply example scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete plus coordination.k8s.io leases and events (leader election), and the `RoleBinding` between them. Set `serviceAccountName: ironhive-controller` on the controller's Deployment to pick it up.
+For in-cluster operation, `manifest.yml` is a ready-to-apply demo scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete plus coordination.k8s.io leases and events (leader election), and the `RoleBinding` between them; a `ConfigMap` carrying the controller config; a 3-replica `Deployment` running `ghcr.io/yankeguo/ironhive:controller-latest` with `serviceAccountName: ironhive-controller` and the config mounted at `/etc/ironhive/config.yml`; and a `Service` exposing the web UI and API.
 
 ### Pod manager
 
