@@ -24,6 +24,8 @@ jobs:
 
       - name: setup-bun
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: controller/web/package.json
 
       - name: frontend-install
         working-directory: controller/web
