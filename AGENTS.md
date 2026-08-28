@@ -35,7 +35,8 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 ### Kubernetes state model (controller)
 
 - Managed pods are named `sandbox-<lowercase ULID>` and carry enforced labels `app.kubernetes.io/managed-by=ironhive-controller` (list/watch selector), `ironhive.dev/pool=<pool>`, and `ironhive.dev/template-hash` (deterministic hash of the pool's `podTemplate`; standby pods with a stale hash are recycled by reconcile, allocated ones are left to their lease).
-- **The pod object is the source of truth.** Allocation is the `ironhive.dev/allocated` annotation, claimed with a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition — that is the entire multi-replica coordination mechanism. Leases live there too: `ironhive.dev/lease-expires` (RFC3339), set at allocate time, extended by `POST /controller/v1/renew`, reaped by reconcile. Do not add leader election, locks, or a database.
+- **The pod object is the source of truth.** Allocation is the `ironhive.dev/allocated` annotation, claimed with a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition — claims stay correct on every replica, no election needed on the allocate path. Leases live there too: `ironhive.dev/lease-expires` (RFC3339), set at allocate time, extended by `POST /controller/v1/renew`, reaped by reconcile.
+- **Reconcile is single-writer via leader election** (`controller/leader.go`, a `coordination.k8s.io` Lease named `ironhive-controller`): only the leader runs the reconcile loop — top-up, sweeps, template-hash recycling — so pool sizing is strongly consistent and nothing is over-created. The watch loop and allocate/renew/release run on all replicas.
 - In-memory state (`PodManager.pods`) is a watch-fed cache for fast reads; it must always be able to reconverge from a fresh list.
 - Sandboxes are single-use: release or lease expiry means delete the pod; reconcile tops the pool up. Do not return used pods to the standby pool.
 - The dashboard and `GET /controller/v1/pools` are read-only, unauthenticated, and frameable on purpose (no `X-Frame-Options`, no CSP `frame-ancestors`) — embedding into third-party systems is a feature; access control is layered in front at deployment time.
@@ -61,7 +62,7 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 ## Deploy references
 
 - `config.yml` — annotated example pool config (`standby.static.count`, `podTemplate`, `agent.port`).
-- `deploy/rbac.yaml` — namespaced Role for the controller (pods get/list/watch/create/update/patch/delete in `ironhive`).
+- `deploy/rbac.yaml` — namespaced Role for the controller (pods get/list/watch/create/update/patch/delete, coordination.k8s.io leases, and events in `ironhive`).
 - `Dockerfile.controller` / `Dockerfile.agent` — multi-stage builds; images published as `ghcr.io/yankeguo/ironhive:{controller,agent}-*`.
 
 ## Scope discipline

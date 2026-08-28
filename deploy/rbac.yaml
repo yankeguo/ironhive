@@ -4,7 +4,8 @@
 # fallback (see controller/kubernetes.go); inside a pod it authenticates
 # as this ServiceAccount, so its permissions are exactly the Role below:
 # full pod management (get/list/watch/create/update/patch/delete) inside
-# the ironhive namespace, nothing else in the cluster.
+# the ironhive namespace, plus coordination.k8s.io leases and events for
+# leader election — nothing else in the cluster.
 #
 # Apply with: kubectl apply -f deploy/rbac.yaml
 # then set serviceAccountName: ironhive-controller on the controller's
@@ -29,6 +30,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election for the reconcile loop (single writer across replicas).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update"]
+  # Leader-change events recorded on the Lease object.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

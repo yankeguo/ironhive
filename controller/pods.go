@@ -115,17 +115,17 @@ func (m *PodManager) Pods() []PodState {
 	return out
 }
 
-// Run lists the managed pods, reconciles the standby counts, then watches
-// for changes. A broken watch is re-established from a fresh list with
-// backoff, so state eventually reconverges after any disconnect. It returns
-// when ctx is cancelled.
+// Run lists the managed pods, then watches for changes to keep the
+// in-memory state current. It runs on every replica — the state feeds the
+// allocate fast path. A broken watch is re-established from a fresh list
+// with backoff, so state eventually reconverges after any disconnect. It
+// returns when ctx is cancelled. Reconcile is NOT part of this loop: it
+// runs only on the elected leader (see RunLeaderElection).
 func (m *PodManager) Run(ctx context.Context) {
-	go m.reconcileLoop(ctx)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		resourceVersion, err := m.list(ctx)
 		if err == nil {
-			m.reconcile(ctx)
 			backoff = time.Second
 			err = m.watch(ctx, resourceVersion)
 		}
@@ -142,9 +142,13 @@ func (m *PodManager) Run(ctx context.Context) {
 	}
 }
 
-// reconcileLoop re-runs reconcile periodically as a safety net against
-// silently missed watch events.
-func (m *PodManager) reconcileLoop(ctx context.Context) {
+// RunReconcile reconciles immediately and then periodically until ctx is
+// cancelled. It must run on at most one replica at a time — the leader
+// election in RunLeaderElection enforces that, making reconcile the
+// single writer of the pool's standby set: no over-creation, and
+// template-hash recycling converges without racing.
+func (m *PodManager) RunReconcile(ctx context.Context) {
+	m.reconcile(ctx)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {

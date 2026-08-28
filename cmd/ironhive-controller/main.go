@@ -52,7 +52,8 @@ func main() {
 	var pm *controller.PodManager
 	if kube != nil && len(cfg.Pools) > 0 {
 		pm = controller.NewPodManager(kube, cfg.Kubernetes.Namespace, cfg)
-		go pm.Run(ctx)
+		go pm.Run(ctx)               // watch loop, every replica
+		go pm.RunLeaderElection(ctx) // reconcile loop, leader only
 		log.Printf("pod manager started in namespace %s", cfg.Kubernetes.Namespace)
 	} else {
 		log.Println("pod manager disabled: no pools configured or no kubernetes client")

@@ -1,0 +1,89 @@
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+// shrinkLeaderTimings makes the election fast enough for tests.
+func shrinkLeaderTimings(t *testing.T) {
+	t.Helper()
+	lease, renew, retry := leaderLeaseDuration, leaderRenewDeadline, leaderRetryPeriod
+	leaderLeaseDuration = time.Second
+	leaderRenewDeadline = 500 * time.Millisecond
+	leaderRetryPeriod = 50 * time.Millisecond
+	t.Cleanup(func() {
+		leaderLeaseDuration, leaderRenewDeadline, leaderRetryPeriod = lease, renew, retry
+	})
+}
+
+func TestLeaderElectionReconciles(t *testing.T) {
+	shrinkLeaderTimings(t)
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(2))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.RunLeaderElection(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pods.Items) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leader did not reconcile: %d pods, want 2", len(pods.Items))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The leadership is recorded on the Lease object.
+	lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
+		t.Error("lease has no holder identity")
+	}
+}
+
+func TestLeaderElectionYieldsToHolder(t *testing.T) {
+	shrinkLeaderTimings(t)
+	// A lease freshly held by another replica for the next minute.
+	now := metav1.MicroTime{Time: time.Now()}
+	duration := int32(60)
+	holder := "other-replica"
+	existing := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: leaderLeaseName, Namespace: "ironhive"},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &holder,
+			RenewTime:            &now,
+			LeaseDurationSeconds: &duration,
+		},
+	}
+	kube := fake.NewSimpleClientset(existing)
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.RunLeaderElection(ctx)
+
+	// This replica is not the leader, so no reconcile may happen.
+	time.Sleep(500 * time.Millisecond)
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("non-leader reconciled: %d pods, want 0", len(pods.Items))
+	}
+}
