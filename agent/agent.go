@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // shellChildren separates children owned by exec.Cmd from orphaned
@@ -39,13 +40,23 @@ func ReapZombies() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGCHLD)
 		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			lastError := ""
 			for {
 				select {
 				case <-sig:
 				case <-shellChildren.wake:
+				case <-ticker.C:
 				}
 				if err := shellChildren.reap(os.Getpid()); err != nil {
-					log.Println("pid 1: zombie reaper:", err)
+					if message := err.Error(); message != lastError {
+						log.Println("pid 1: zombie reaper:", err)
+						lastError = message
+					}
+				} else if lastError != "" {
+					log.Println("pid 1: zombie reaper recovered")
+					lastError = ""
 				}
 			}
 		}()
@@ -160,6 +171,14 @@ func (m *childManager) reapAnyIfIdle(listErr error) error {
 // directChildren reads PPid from procfs instead of using wait4(-1), which
 // cannot exclude commands that belong to exec.Cmd.
 func directChildren(parent int) ([]int, error) {
+	target, err := os.Readlink("/proc/self")
+	if err != nil {
+		return nil, err
+	}
+	procPID, err := strconv.Atoi(filepath.Base(target))
+	if err != nil || procPID != parent {
+		return nil, fmt.Errorf("/proc is outside the process PID namespace")
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err

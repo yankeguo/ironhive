@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"reflect"
 	"syscall"
@@ -120,5 +121,14 @@ func TestProcParentPID(t *testing.T) {
 	}
 	if _, err := procParentPID([]byte("Name:\ttest\n")); err == nil {
 		t.Fatal("missing PPid did not fail")
+	}
+}
+
+func TestDirectChildrenValidatesPIDNamespace(t *testing.T) {
+	if _, err := directChildren(os.Getpid()); err != nil {
+		t.Fatalf("current procfs rejected: %v", err)
+	}
+	if _, err := directChildren(os.Getpid() + 1); err == nil {
+		t.Fatal("mismatched procfs namespace was accepted")
 	}
 }
