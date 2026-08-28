@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// dirEntry is one item in a GET /v1/dir listing.
+// dirEntry is one item in a GET /agent/v1/dir listing.
 type dirEntry struct {
 	Name  string `json:"name"`
 	Dir   bool   `json:"dir"`
@@ -19,7 +19,7 @@ type dirEntry struct {
 	Mtime string `json:"mtime"`
 }
 
-// DirGetHandler serves GET /v1/dir?path=<dir>: a JSON array of the
+// DirGetHandler serves GET /agent/v1/dir?path=<dir>: a JSON array of the
 // directory's entries, sorted by name. path may be absolute, or relative
 // to the process working directory.
 func DirGetHandler() http.HandlerFunc {
@@ -66,9 +66,9 @@ func DirGetHandler() http.HandlerFunc {
 	}
 }
 
-// DirPutHandler serves PUT /v1/dir?path=<dir>: create the directory (and
+// DirPutHandler serves PUT /agent/v1/dir?path=<dir>: create the directory (and
 // parents) like mkdir -p. Optional query parameters, same syntax as
-// PUT /v1/file:
+// PUT /agent/v1/file:
 //
 //	chmod — directory mode as zero-prefixed octal, e.g. "0755"
 //	chown — owner as "user:group"; names or numeric ids, either side

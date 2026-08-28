@@ -117,10 +117,10 @@ func matchSegments(pat, name []string) bool {
 	return len(name) == 0
 }
 
-// TarGetHandler serves GET /v1/tar?path=<dir>: the directory at path is
+// TarGetHandler serves GET /agent/v1/tar?path=<dir>: the directory at path is
 // streamed back as an uncompressed tar archive attachment named
 // "<dirname>.tar". Entry names are relative to the directory itself, so
-// the archive round-trips through PUT /v1/tar into any destination.
+// the archive round-trips through PUT /agent/v1/tar into any destination.
 // Directories and regular files are included with their modes and mtimes;
 // symlinks and other special files are skipped. path may be absolute, or
 // relative to the process working directory. The repeatable include and
@@ -160,7 +160,7 @@ func TarGetHandler() http.HandlerFunc {
 		// truncate the response; log it for server-side visibility.
 		tw := tar.NewWriter(w)
 		if err := writeDirToTar(tw, p, filter); err != nil {
-			log.Printf("GET /v1/tar: %s: stream aborted: %v", p, err)
+			log.Printf("GET /agent/v1/tar: %s: stream aborted: %v", p, err)
 		}
 		_ = tw.Close()
 	}
@@ -248,12 +248,12 @@ func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 	})
 }
 
-// TarUploadHandler serves POST /v1/tar/upload?path=<dir>&url=<url>: the
+// TarUploadHandler serves POST /agent/v1/tar/upload?path=<dir>&url=<url>: the
 // directory at path is packed as an uncompressed tar stream — the same
-// archive GET /v1/tar produces, honoring the same repeatable include and
+// archive GET /agent/v1/tar produces, honoring the same repeatable include and
 // exclude filters — and streamed as the request body to url with
 // Content-Type application/x-tar. method and headers behave as in
-// POST /v1/file/upload. The stream length is unknown upfront, so the
+// POST /agent/v1/file/upload. The stream length is unknown upfront, so the
 // upload uses chunked encoding. A non-2xx upstream response is reported
 // as 502.
 func TarUploadHandler() http.HandlerFunc {
@@ -310,12 +310,12 @@ func TarUploadHandler() http.HandlerFunc {
 // filesystem failures, so the handler can answer 400 instead of 500.
 var errBadTar = errors.New("invalid tar archive")
 
-// TarPutHandler serves PUT /v1/tar?path=<dir>: the request body is an
+// TarPutHandler serves PUT /agent/v1/tar?path=<dir>: the request body is an
 // uncompressed tar stream extracted into path (created if missing).
 // When the url query parameter is given, the body is expected to be
 // empty and the tar stream is downloaded from that http(s) URL instead.
 // The repeatable include and exclude query parameters limit which
-// entries are extracted, with the same pattern syntax as GET /v1/tar;
+// entries are extracted, with the same pattern syntax as GET /agent/v1/tar;
 // entries not passing the filter are skipped. Regular files and
 // directories are supported; absolute entry names and entries escaping
 // the destination are rejected. Existing files are overwritten; on a

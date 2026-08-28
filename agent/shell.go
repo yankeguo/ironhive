@@ -68,7 +68,7 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// ShellPostHandler serves POST /v1/shell, running the "command" parameter
+// ShellPostHandler serves POST /agent/v1/shell, running the "command" parameter
 // via bash. Parameters may arrive in the query string, the urlencoded form
 // body, or both (body wins on conflicts). The shell is stateless: every
 // call starts from the process working directory and environment, unless

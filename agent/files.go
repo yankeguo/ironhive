@@ -88,7 +88,7 @@ func requirePath(w http.ResponseWriter, q url.Values) (p string, unlock func(), 
 	return p, lockPath(p), true
 }
 
-// FilesGetHandler serves GET /v1/file?path=<file>: the file at path is
+// FilesGetHandler serves GET /agent/v1/file?path=<file>: the file at path is
 // returned as an attachment. path may be absolute, or relative to the
 // process working directory.
 func FilesGetHandler() http.HandlerFunc {
@@ -122,7 +122,7 @@ func FilesGetHandler() http.HandlerFunc {
 	}
 }
 
-// FilesPutHandler serves PUT /v1/file?path=<file>: the request body is
+// FilesPutHandler serves PUT /agent/v1/file?path=<file>: the request body is
 // written to path atomically — the body lands in a temporary file in the
 // same directory, which is then renamed over path, so concurrent readers
 // never see a partial file. Missing parent directories are created
@@ -327,7 +327,7 @@ func uploadStream(w http.ResponseWriter, r *http.Request, method, rawURL string,
 	return true
 }
 
-// FilesUploadHandler serves POST /v1/file/upload?path=<file>&url=<url>:
+// FilesUploadHandler serves POST /agent/v1/file/upload?path=<file>&url=<url>:
 // the local file at path is streamed as the request body to url, using the
 // method given by the method query parameter (default POST; only PUT, POST
 // and PATCH are accepted, since the request carries a body). Extra headers
