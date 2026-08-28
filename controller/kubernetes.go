@@ -3,11 +3,29 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+// serviceAccountNamespacePath is where Kubernetes mounts the pod's own
+// namespace; a variable so tests can point it elsewhere.
+var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+// DefaultNamespace resolves the namespace managed pods live in: the
+// in-cluster service-account namespace when running inside a pod, else
+// "default".
+func DefaultNamespace() string {
+	if data, err := os.ReadFile(serviceAccountNamespacePath); err == nil {
+		if ns := strings.TrimSpace(string(data)); ns != "" {
+			return ns
+		}
+	}
+	return "default"
+}
 
 // NewKubernetesClient builds a clientset, resolving credentials in order:
 //

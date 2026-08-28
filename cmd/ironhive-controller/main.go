@@ -19,10 +19,12 @@ func main() {
 	listen := envOr("IHC_LISTEN", ":8080")
 	kubeconfig := envOr("IHC_KUBECONFIG", "")
 	config := envOr("IHC_CONFIG", "config.yml")
+	namespace := envOr("IHC_NAMESPACE", controller.DefaultNamespace())
 	flag.StringVar(&listen, "listen", listen, "http listen address")
 	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig,
 		"kubeconfig path; defaults to the standard loading rules, with in-cluster config as fallback")
 	flag.StringVar(&config, "config", config, "config file path")
+	flag.StringVar(&namespace, "namespace", namespace, "namespace managed pods live in")
 	flag.Parse()
 
 	// The config file is optional while nothing consumes it yet: absent is
@@ -50,6 +52,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// The pod manager keeps standby pods warm; like the client and config
+	// it is best-effort — without either one the web UI still serves.
+	if kube != nil && cfg != nil {
+		pm := controller.NewPodManager(kube, namespace, cfg)
+		go pm.Run(ctx)
+		log.Printf("pod manager started in namespace %s", namespace)
+	} else {
+		log.Println("pod manager disabled: no config file or no kubernetes client")
+	}
 
 	srv := &http.Server{
 		Addr:              listen,
