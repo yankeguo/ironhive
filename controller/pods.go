@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -25,6 +28,10 @@ import (
 const (
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 	LabelPool      = "ironhive.dev/pool"
+	// LabelTemplateHash records the deterministic hash of the pool's
+	// podTemplate at creation time; reconcile recycles standby pods
+	// whose hash no longer matches the configured template.
+	LabelTemplateHash = "ironhive.dev/template-hash"
 
 	ManagedByValue = "ironhive-controller"
 )
@@ -65,6 +72,9 @@ type PodState struct {
 	// LeaseExpires is the deadline of the allocation's lease; zero when
 	// the pod is not allocated. Expired pods are destroyed by reconcile.
 	LeaseExpires time.Time
+	// TemplateHash is the hash of the pool's podTemplate when the pod was
+	// created; standby pods with a stale hash are recycled by reconcile.
+	TemplateHash string
 	// ResourceVersion is the pod's last seen resourceVersion, used as the
 	// optimistic-concurrency precondition when claiming the pod.
 	ResourceVersion string
@@ -212,9 +222,15 @@ func (m *PodManager) applyEvent(ev watch.Event) {
 // pods and expired leases so they do not pile up. Failures are logged and
 // retried on the next pass.
 func (m *PodManager) reconcile(ctx context.Context) {
+	// Precompute the current template hash of every configured pool.
+	hashes := make(map[string]string, len(m.cfg.Pools))
+	for name, pool := range m.cfg.Pools {
+		hashes[name] = podTemplateHash(pool.PodTemplate)
+	}
+
 	m.mu.RLock()
 	active := make(map[string]int, len(m.cfg.Pools))
-	var terminated, expired []string
+	var terminated, expired, stale []string
 	now := time.Now()
 	for _, p := range m.pods {
 		// A freshly created pod has an empty phase until the API server
@@ -229,6 +245,13 @@ func (m *PodManager) reconcile(ctx context.Context) {
 			if now.After(p.LeaseExpires) {
 				expired = append(expired, p.Name)
 			}
+		case p.TemplateHash != hashes[p.Pool]:
+			// The pool is gone from the config or its podTemplate
+			// changed since this pod was created — recycle the standby
+			// pod so the pool converges on the current template.
+			// Allocated pods are left alone: a client is using them and
+			// the lease expiry will reclaim them in time.
+			stale = append(stale, p.Name)
 		default:
 			active[p.Pool]++
 		}
@@ -247,6 +270,13 @@ func (m *PodManager) reconcile(ctx context.Context) {
 			log.Println("pod manager: delete expired-lease pod", name, ":", err)
 		} else {
 			log.Println("pod manager: deleted pod", name, "with expired lease")
+		}
+	}
+	for _, name := range stale {
+		if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+			log.Println("pod manager: delete stale-template pod", name, ":", err)
+		} else {
+			log.Println("pod manager: deleted pod", name, "with stale template")
 		}
 	}
 
@@ -284,6 +314,7 @@ func (m *PodManager) createPod(ctx context.Context, poolName string, pool PoolCo
 	}
 	pod.Labels[LabelManagedBy] = ManagedByValue
 	pod.Labels[LabelPool] = poolName
+	pod.Labels[LabelTemplateHash] = podTemplateHash(pool.PodTemplate)
 
 	created, err := m.kube.CoreV1().Pods(m.namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
@@ -315,6 +346,7 @@ func podStateFrom(pod *corev1.Pod) *PodState {
 		Ready:           ready,
 		Allocated:       pod.Annotations[AnnotationAllocated] != "",
 		LeaseExpires:    leaseExpires,
+		TemplateHash:    pod.Labels[LabelTemplateHash],
 		ResourceVersion: pod.ResourceVersion,
 		CreatedAt:       pod.CreationTimestamp.Time,
 		UpdatedAt:       time.Now(),
@@ -461,4 +493,13 @@ func (m *PodManager) Release(ctx context.Context, name string) error {
 	m.mu.Unlock()
 	log.Println("pod manager: released pod", name)
 	return nil
+}
+
+// podTemplateHash returns a deterministic short hash of a pod template.
+// encoding/json marshals struct fields in declaration order and sorts map
+// keys, so equal templates always produce equal hashes.
+func podTemplateHash(tmpl corev1.PodTemplateSpec) string {
+	data, _ := json.Marshal(tmpl) // PodTemplateSpec has no failing marshalers
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
 }

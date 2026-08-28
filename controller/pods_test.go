@@ -402,3 +402,109 @@ func TestReconcileReapsExpiredLease(t *testing.T) {
 		t.Fatalf("after reap+top-up: %d pods, want 1", len(pods.Items))
 	}
 }
+
+func TestPodTemplateHashDeterministic(t *testing.T) {
+	base := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"a": "1", "b": "2"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img"}}},
+	}
+	// Same content, different map insertion order — must hash equal.
+	reordered := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"b": "2", "a": "1"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img"}}},
+	}
+	// Independently built, so nothing is shared with base.
+	changed := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"a": "1", "b": "2"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v2"}}},
+	}
+
+	h := podTemplateHash(base)
+	if podTemplateHash(reordered) != h {
+		t.Error("hash differs for equal templates")
+	}
+	if podTemplateHash(changed) == h {
+		t.Error("hash unchanged after template change")
+	}
+	if len(h) != 16 {
+		t.Errorf("hash = %q, want 16 hex chars", h)
+	}
+}
+
+func TestReconcileRecyclesStaleTemplate(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(2))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := podTemplateHash(m.cfg.Pools["default"].PodTemplate)
+	for _, pod := range pods.Items {
+		if pod.Labels[LabelTemplateHash] != wantHash {
+			t.Fatalf("pod %s template-hash = %q, want %q", pod.Name, pod.Labels[LabelTemplateHash], wantHash)
+		}
+	}
+
+	// Change the pool's template; the old standby pods become stale.
+	pool := m.cfg.Pools["default"]
+	pool.PodTemplate.Spec.Containers[0].Image = "img:v2"
+	m.cfg.Pools["default"] = pool
+
+	m.reconcile(ctx)
+
+	pods, err = kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("after recycle: %d pods, want 2", len(pods.Items))
+	}
+	newHash := podTemplateHash(pool.PodTemplate)
+	for _, pod := range pods.Items {
+		if pod.Labels[LabelTemplateHash] != newHash {
+			t.Errorf("pod %s template-hash = %q, want %q", pod.Name, pod.Labels[LabelTemplateHash], newHash)
+		}
+		if pod.Spec.Containers[0].Image != "img:v2" {
+			t.Errorf("pod %s image = %q, want img:v2", pod.Name, pod.Spec.Containers[0].Image)
+		}
+	}
+}
+
+func TestReconcileKeepsAllocatedPodWithStaleTemplate(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(2))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	st, err := m.Allocate(ctx, "default", time.Hour, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the template; the allocated pod must survive, the standby
+	// one is recycled, and the pool tops back up to 2 standby + 1 in use.
+	pool := m.cfg.Pools["default"]
+	pool.PodTemplate.Spec.Containers[0].Image = "img:v2"
+	m.cfg.Pools["default"] = pool
+
+	m.reconcile(ctx)
+
+	allocated, err := kube.CoreV1().Pods("ironhive").Get(ctx, st.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal("allocated pod was recycled:", err)
+	}
+	if allocated.Annotations[AnnotationAllocated] == "" {
+		t.Error("allocated pod lost its annotation")
+	}
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 3 {
+		t.Fatalf("after recycle+top-up: %d pods, want 3", len(pods.Items))
+	}
+}
