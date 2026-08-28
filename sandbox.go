@@ -107,7 +107,7 @@ func (s *Sandbox) PutFile(ctx context.Context, path string, r io.Reader, opts *P
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	closeBody(resp.Body)
 	return nil
 }
 
@@ -131,7 +131,7 @@ func (s *Sandbox) PutTar(ctx context.Context, path string, r io.Reader, opts *Ta
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	closeBody(resp.Body)
 	return nil
 }
 
@@ -168,7 +168,7 @@ func (s *Sandbox) upload(ctx context.Context, endpoint, path, targetURL string, 
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	closeBody(resp.Body)
 	return nil
 }
 
@@ -203,7 +203,7 @@ func (s *Sandbox) Mkdir(ctx context.Context, path string, opts *PermOptions) err
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	closeBody(resp.Body)
 	return nil
 }
 
@@ -249,16 +249,17 @@ func (s *Sandbox) Shell(ctx context.Context, command string, opts *ShellOptions,
 	}
 	defer resp.Body.Close()
 
-	var eventType, data string
+	var eventType string
+	var data []string
 	dispatch := func() error {
 		if eventType == "" {
 			return nil
 		}
-		ev := ShellEvent{Type: eventType, Data: data}
+		ev := ShellEvent{Type: eventType, Data: strings.Join(data, "\n")}
 		// stdout / stderr / exit / cwd carry a JSON-encoded string;
 		// env carries a JSON object, left raw.
 		var decoded string
-		if err := json.Unmarshal([]byte(data), &decoded); err == nil {
+		if err := json.Unmarshal([]byte(ev.Data), &decoded); err == nil {
 			ev.Data = decoded
 		}
 		return onEvent(ev)
@@ -272,15 +273,22 @@ func (s *Sandbox) Shell(ctx context.Context, command string, opts *ShellOptions,
 			if err := dispatch(); err != nil {
 				return err
 			}
-			eventType, data = "", ""
+			eventType, data = "", nil
 		case strings.HasPrefix(line, "event:"):
-			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			eventType = sseFieldValue(line)
 		case strings.HasPrefix(line, "data:"):
-			data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			data = append(data, sseFieldValue(line))
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("ironhive: read shell stream: %w", err)
 	}
 	return dispatch()
+}
+
+// sseFieldValue extracts the value of an SSE field line, stripping the
+// single optional space after the colon.
+func sseFieldValue(line string) string {
+	_, v, _ := strings.Cut(line, ":")
+	return strings.TrimPrefix(v, " ")
 }

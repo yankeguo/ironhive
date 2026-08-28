@@ -38,8 +38,13 @@ type Option func(*Client)
 // WithHTTPClient sets the http.Client used for all requests — for custom
 // transports, proxies or tracing. Do not set a Timeout on it; use
 // per-call contexts instead, so long-running shell sessions keep working.
+// A nil client is ignored.
 func WithHTTPClient(h *http.Client) Option {
-	return func(c *Client) { c.http = h }
+	return func(c *Client) {
+		if h != nil {
+			c.http = h
+		}
+	}
 }
 
 // NewClient returns a Client for the controller at baseURL, e.g.
@@ -140,7 +145,7 @@ func (c *Client) Release(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	closeBody(resp.Body)
 	return nil
 }
 
@@ -189,8 +194,17 @@ func decodeError(resp *http.Response) error {
 	var body struct {
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err == nil && body.Message != "" {
+	// The envelope is small by convention; the cap keeps a misbehaving
+	// server from making the client buffer an unbounded error body.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err == nil && body.Message != "" {
 		e.Message = body.Message
 	}
 	return e
+}
+
+// closeBody drains the small envelope response so the underlying
+// connection stays reusable, then closes the body.
+func closeBody(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, 4096))
+	body.Close()
 }
