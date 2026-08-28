@@ -15,6 +15,9 @@ const (
 	DefaultStandbyStaticCount = 10
 	DefaultAgentPort          = 19173
 	DefaultListen             = ":8080"
+	// AgentPortName is the container port name that marks the agent's
+	// listen port in a pool's pod template.
+	AgentPortName = "http-ironhive"
 )
 
 // Config is the controller's config.yml: an `http` section, a
@@ -55,8 +58,6 @@ type PoolConfig struct {
 	// management entries when a pod is created; controller-owned
 	// allocation annotations are stripped.
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
-	// Agent describes the ironhive-agent endpoint inside each pod.
-	Agent PoolAgentConfig `json:"agent"`
 }
 
 // StandbyConfig groups the standby sizing strategies; only static exists
@@ -72,10 +73,25 @@ type StaticStandbyConfig struct {
 	Count int `json:"count"`
 }
 
-// PoolAgentConfig describes the agent endpoint inside a pool's pods.
-type PoolAgentConfig struct {
-	// Port the agent listens on; 0 selects the default.
-	Port int `json:"port"`
+// AgentPort derives the agent's listen port from the pod template's
+// container ports: the port named http-ironhive wins, else the first
+// declared port, else the default.
+func (p PoolConfig) AgentPort() int32 {
+	var first int32
+	for _, c := range p.PodTemplate.Spec.Containers {
+		for _, cp := range c.Ports {
+			if cp.Name == AgentPortName {
+				return cp.ContainerPort
+			}
+			if first == 0 {
+				first = cp.ContainerPort
+			}
+		}
+	}
+	if first != 0 {
+		return first
+	}
+	return DefaultAgentPort
 }
 
 // LoadConfig reads, parses, defaults and validates the config file at
@@ -118,9 +134,6 @@ func (c *Config) applyDefaults() {
 		if p.Standby.Static.Count == 0 {
 			p.Standby.Static.Count = DefaultStandbyStaticCount
 		}
-		if p.Agent.Port == 0 {
-			p.Agent.Port = DefaultAgentPort
-		}
 		c.Pools[name] = p
 	}
 }
@@ -138,9 +151,6 @@ func (c *Config) validate() error {
 		}
 		if p.Standby.Static.Count < 0 {
 			return fmt.Errorf("pool %q: standby.static.count must be >= 0", name)
-		}
-		if p.Agent.Port < 1 || p.Agent.Port > 65535 {
-			return fmt.Errorf("pool %q: agent.port %d out of range", name, p.Agent.Port)
 		}
 	}
 	return nil

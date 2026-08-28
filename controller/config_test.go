@@ -45,8 +45,8 @@ pools:
 	if pool.Standby.Static.Count != DefaultStandbyStaticCount {
 		t.Fatalf("standby.static.count = %d, want %d", pool.Standby.Static.Count, DefaultStandbyStaticCount)
 	}
-	if pool.Agent.Port != DefaultAgentPort {
-		t.Fatalf("agent.port = %d, want %d", pool.Agent.Port, DefaultAgentPort)
+	if got := pool.AgentPort(); got != DefaultAgentPort {
+		t.Fatalf("AgentPort() = %d, want %d", got, DefaultAgentPort)
 	}
 	if got := pool.PodTemplate.Spec.Containers[0].Image; got != "ghcr.io/yankeguo/ironhive:agent-latest" {
 		t.Fatalf("podTemplate image = %q", got)
@@ -73,8 +73,10 @@ pools:
         containers:
           - name: agent
             image: agent:dev
-    agent:
-      port: 9090
+            ports:
+              - containerPort: 8080
+              - name: http-ironhive
+                containerPort: 9090
 `)
 	cfg, err := LoadConfig(p)
 	if err != nil {
@@ -93,11 +95,35 @@ pools:
 	if pool.Standby.Static.Count != 3 {
 		t.Fatalf("count = %d, want 3", pool.Standby.Static.Count)
 	}
-	if pool.Agent.Port != 9090 {
-		t.Fatalf("port = %d, want 9090", pool.Agent.Port)
+	// The http-ironhive port wins over the first declared one.
+	if got := pool.AgentPort(); got != 9090 {
+		t.Fatalf("AgentPort() = %d, want 9090", got)
 	}
 	if pool.PodTemplate.Labels["pool"] != "heavy" {
 		t.Fatalf("labels = %v", pool.PodTemplate.Labels)
+	}
+}
+
+func TestPoolAgentPort(t *testing.T) {
+	// No named port: the first declared container port wins.
+	p := writeConfig(t, `
+pools:
+  x:
+    podTemplate:
+      spec:
+        containers:
+          - name: agent
+            image: agent:dev
+            ports:
+              - containerPort: 8080
+              - containerPort: 9090
+`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Pools["x"].AgentPort(); got != 8080 {
+		t.Fatalf("AgentPort() = %d, want 8080", got)
 	}
 }
 
@@ -114,11 +140,6 @@ func TestLoadConfigErrors(t *testing.T) {
 	p := writeConfig(t, "pools:\n  x:\n    standby:\n      static:\n        count: -1\n")
 	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "count") {
 		t.Fatalf("negative count: err = %v", err)
-	}
-	// Out-of-range agent port.
-	p = writeConfig(t, "pools:\n  x:\n    agent:\n      port: 70000\n")
-	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "port") {
-		t.Fatalf("bad port: err = %v", err)
 	}
 	// A pool name that is not a valid label value.
 	p = writeConfig(t, "pools:\n  'bad name': {}\n")

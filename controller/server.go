@@ -347,11 +347,11 @@ func (s *Server) handleAgentProxy(w http.ResponseWriter, r *http.Request) {
 
 // defaultAgentURL targets the agent's listen address inside the pod.
 func (s *Server) defaultAgentURL(st PodState) string {
-	port := DefaultAgentPort
-	if pool, ok := s.Config.Pools[st.Pool]; ok && pool.Agent.Port > 0 {
-		port = pool.Agent.Port
+	var pool PoolConfig
+	if p, ok := s.Config.Pools[st.Pool]; ok {
+		pool = p
 	}
-	return "http://" + net.JoinHostPort(st.IP, strconv.Itoa(port))
+	return "http://" + net.JoinHostPort(st.IP, strconv.Itoa(int(pool.AgentPort())))
 }
 
 // formParams parses and returns the merged query and urlencoded form-body

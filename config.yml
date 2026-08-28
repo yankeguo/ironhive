@@ -51,6 +51,12 @@ pools:
             image: python:3.14
             command: ["/.ironhive/bin/ironhive-agent"]
             args: ["-listen", ":19173"]
+            # The controller derives the agent's port from the template's
+            # container ports: the one named http-ironhive wins, else the
+            # first declared port, else the default 19173.
+            ports:
+              - name: http-ironhive
+                containerPort: 19173
             # The controller hands out pods once they are Ready; gate the
             # Ready condition on the agent actually serving, so an
             # allocated sandbox never 502s on first contact. Not
@@ -58,11 +64,7 @@ pools:
             readinessProbe:
               httpGet:
                 path: /healthz
-                port: 19173
+                port: http-ironhive
             volumeMounts:
               - name: ironhive-bin
                 mountPath: /.ironhive/bin
-    # agent — the ironhive-agent endpoint inside each pod.
-    agent:
-      # port — port the agent listens on (default 19173).
-      port: 19173
