@@ -68,6 +68,19 @@ data: "0"
 
 One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code.
 
+If the client disconnects, the command's whole **process group** (bash plus any pipeline or subshell children) receives `SIGTERM` — the wrapper's `EXIT` trap still saves the state snapshot — and the process is `SIGKILL`ed after a 5-second grace period. Disconnecting is therefore a reliable cancel; a command whose descendants ignore `SIGTERM` may leave orphans behind, which are reparented to PID 1 and reaped when they eventually die.
+
+### Upstream contract
+
+The agent is deliberately low-level; the harness (timeouts, budget enforcement, session policy) lives upstream in the controller / LLM agent. The levers available to the upstream:
+
+- **Cancel / timeout** — close the connection. There is no server-side timeout by design; the upstream enforces its own deadline and disconnects, which triggers the teardown described above.
+- **Output capping** — read until you have enough, then disconnect. The agent streams unbounded output line by line and never truncates; the upstream decides when a command has said enough.
+- **Background processes** — `nohup cmd &` (or plain `cmd &`) works: the handler does not hang on backgrounded grandchildren holding the output pipes open, and re-parented orphans are reaped by PID 1. Job tracking, if wanted, is upstream bookkeeping.
+- **Serialized shell** — one command at a time (calls share the on-disk state snapshot); a long-running foreground command blocks every later call. Background long-lived processes (dev servers, watchers) instead of waiting on them.
+- **No size or time limits anywhere** — uploads, downloads and tar streams are unbounded. Quotas and limits are upstream or deployment concerns.
+- **Security model** — these endpoints are unauthenticated remote code execution by design. The container network must isolate the agent so that only the controller can reach it; never publish the port.
+
 ## Develop
 
 ```bash
