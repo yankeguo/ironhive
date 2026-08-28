@@ -5,6 +5,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -95,8 +96,11 @@ func FilesGetHandler() http.HandlerFunc {
 // written to path atomically — the body lands in a temporary file in the
 // same directory, which is then renamed over path, so concurrent readers
 // never see a partial file. Missing parent directories are created
-// automatically. Optional query parameters:
+// automatically. When the url query parameter is given, the body is
+// expected to be empty and the content is downloaded from that http(s)
+// URL instead, with the same atomic write. Optional query parameters:
 //
+//	url   — download content from this http(s) URL instead of the body
 //	chmod — file mode as zero-prefixed octal, e.g. "0644" (default "0644")
 //	chown — owner as "user:group"; either side may be a name or a numeric
 //	        id, and either side may be omitted ("user", ":group", "1000:1000")
@@ -127,11 +131,39 @@ func FilesPutHandler() http.HandlerFunc {
 			}
 			uid, gid = u, g
 		}
+		rawURL := q.Get("url")
+		if rawURL != "" {
+			u, err := url.Parse(rawURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				http.Error(w, "invalid url: must be an absolute http(s) URL", http.StatusBadRequest)
+				return
+			}
+		}
 		p, unlock, ok := requirePath(w, r)
 		if !ok {
 			return
 		}
 		defer unlock()
+		// The content source is the request body, unless url is given.
+		src := r.Body
+		if rawURL != "" {
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
+			if err != nil {
+				http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				http.Error(w, "download: "+resp.Status, http.StatusBadGateway)
+				return
+			}
+			src = resp.Body
+		}
 		// Parent directories are created automatically, like mkdir -p.
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -148,7 +180,7 @@ func FilesPutHandler() http.HandlerFunc {
 		// No-op after a successful rename; removes the temp file on any
 		// failure path below.
 		defer os.Remove(tmpName)
-		if _, err := io.Copy(f, r.Body); err != nil {
+		if _, err := io.Copy(f, src); err != nil {
 			f.Close()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

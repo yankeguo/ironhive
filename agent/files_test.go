@@ -196,6 +196,51 @@ func TestFilesPutAtomic(t *testing.T) {
 	}
 }
 
+func TestFilesPutFromURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("downloaded"))
+	}))
+	defer srv.Close()
+	p := filepath.Join(t.TempDir(), "dl.txt")
+	rec := put(t, putTarget(p, "&url="+url.QueryEscape(srv.URL+"/file")), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "downloaded" {
+		t.Fatalf("content = %q, want %q", data, "downloaded")
+	}
+	// chmod applies to downloaded content too.
+	p2 := filepath.Join(t.TempDir(), "dl2.sh")
+	rec = put(t, putTarget(p2, "&url="+url.QueryEscape(srv.URL)+"&chmod=0755"), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if st, _ := os.Stat(p2); st.Mode().Perm() != 0o755 {
+		t.Fatalf("mode = %o, want 755", st.Mode().Perm())
+	}
+}
+
+func TestFilesPutFromURLErrors(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "dl.txt")
+	if rec := put(t, putTarget(p, "&url=ftp://example.com/x"), ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-http url: status = %d, want 400", rec.Code)
+	}
+	if rec := put(t, putTarget(p, "&url="+url.QueryEscape("http://127.0.0.1:1/x")), ""); rec.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable url: status = %d, want 502", rec.Code)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	if rec := put(t, putTarget(p, "&url="+url.QueryEscape(srv.URL)), ""); rec.Code != http.StatusBadGateway {
+		t.Fatalf("non-200 upstream: status = %d, want 502", rec.Code)
+	}
+	// Failed downloads must not create the target file.
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("target should not exist after failed download: %v", err)
+	}
+}
+
 func TestFilesConcurrentSamePath(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "shared.txt")
