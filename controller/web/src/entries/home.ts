@@ -117,20 +117,20 @@ function showBanner(message?: string): void {
   }
 }
 
-let refreshSequence = 0
+let refreshInFlight = false
 
 async function refresh(): Promise<void> {
-  const sequence = ++refreshSequence
+  if (refreshInFlight) return
+  refreshInFlight = true
   try {
     const resp = await fetch('/controller/v1/pools', { cache: 'no-store' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = (await resp.json()) as PoolsResponse
-    if (sequence !== refreshSequence) return
-    render(data)
+    render((await resp.json()) as PoolsResponse)
     showBanner()
   } catch (e) {
-    if (sequence !== refreshSequence) return
     showBanner(`cluster state unavailable: ${e instanceof Error ? e.message : e}`)
+  } finally {
+    refreshInFlight = false
   }
 }
 
