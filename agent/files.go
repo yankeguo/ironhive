@@ -238,6 +238,98 @@ func putSource(w http.ResponseWriter, r *http.Request, rawURL string) (src io.Re
 	return resp.Body, true
 }
 
+// FilesUploadHandler serves POST /v1/file/upload?path=<file>&url=<url>:
+// the local file at path is streamed as the request body to url, using the
+// method given by the method query parameter (default POST; only PUT, POST
+// and PATCH are accepted, since the request carries a body). Extra headers
+// may be attached with the repeatable headers query parameter, each in
+// "key=value" form. A non-2xx upstream response is reported as 502.
+func FilesUploadHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		// Validate options before touching the filesystem.
+		rawURL := q.Get("url")
+		if rawURL == "" {
+			http.Error(w, "missing query parameter: url", http.StatusBadRequest)
+			return
+		}
+		if err := validatePutURL(rawURL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		method := strings.ToUpper(q.Get("method"))
+		if method == "" {
+			method = http.MethodPost
+		}
+		switch method {
+		case http.MethodPut, http.MethodPost, http.MethodPatch:
+		default:
+			http.Error(w, "invalid method: must be PUT, POST or PATCH", http.StatusBadRequest)
+			return
+		}
+		var hdrs [][2]string
+		for _, h := range q["headers"] {
+			k, v, found := strings.Cut(h, "=")
+			if !found || k == "" {
+				http.Error(w, fmt.Sprintf("invalid headers entry %q: must be key=value", h), http.StatusBadRequest)
+				return
+			}
+			hdrs = append(hdrs, [2]string{k, v})
+		}
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
+			return
+		}
+		defer unlock()
+		f, err := os.Open(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "not found: "+p, http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if st.IsDir() {
+			http.Error(w, "is a directory: "+p, http.StatusBadRequest)
+			return
+		}
+		req, err := http.NewRequestWithContext(r.Context(), method, rawURL, f)
+		if err != nil {
+			http.Error(w, "upload: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.ContentLength = st.Size()
+		for _, h := range hdrs {
+			req.Header.Add(h[0], h[1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "upload: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			// Include a bounded slice of the upstream body for debugging.
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			msg := "upload: upstream " + resp.Status
+			if s := strings.TrimSpace(string(snippet)); s != "" {
+				msg += ": " + s
+			}
+			http.Error(w, msg, http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("OK"))
+	}
+}
+
 // parseChmod parses a zero-prefixed octal file mode, e.g. "0644".
 func parseChmod(s string) (os.FileMode, error) {
 	if !strings.HasPrefix(s, "0") {

@@ -241,6 +241,96 @@ func TestFilesPutFromURLErrors(t *testing.T) {
 	}
 }
 
+func upload(t *testing.T, path, extraQuery string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		"/v1/file/upload?path="+url.QueryEscape(path)+extraQuery, nil)
+	rec := httptest.NewRecorder()
+	FilesUploadHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestFilesUpload(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(p, []byte("payload-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotMethod, gotAuth, gotBody string
+	var gotLen int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotLen = r.ContentLength
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+	}))
+	defer srv.Close()
+
+	rec := upload(t, p, "&url="+url.QueryEscape(srv.URL+"/up")+
+		"&method=put&headers="+url.QueryEscape("Authorization=Bearer t0ken"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %q, want PUT", gotMethod)
+	}
+	if gotAuth != "Bearer t0ken" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+	if gotBody != "payload-content" {
+		t.Fatalf("body = %q", gotBody)
+	}
+	if gotLen != int64(len("payload-content")) {
+		t.Fatalf("ContentLength = %d", gotLen)
+	}
+
+	// method defaults to POST.
+	rec = upload(t, p, "&url="+url.QueryEscape(srv.URL))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default method: status = %d (%s)", rec.Code, rec.Body)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("default method = %q, want POST", gotMethod)
+	}
+}
+
+func TestFilesUploadErrors(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rec := upload(t, p, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing url: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(t, p, "&url="+url.QueryEscape("ftp://example.com/x")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-http url: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(t, p, "&url="+url.QueryEscape("http://example.com")+"&method=get"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bodiless method: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(t, p, "&url="+url.QueryEscape("http://example.com")+"&headers="+url.QueryEscape("noequals")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad headers entry: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(t, filepath.Join(t.TempDir(), "nope"), "&url="+url.QueryEscape("http://example.com")); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing file: status = %d, want 404", rec.Code)
+	}
+	if rec := upload(t, t.TempDir(), "&url="+url.QueryEscape("http://example.com")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("directory: status = %d, want 400", rec.Code)
+	}
+	// Upstream failure surfaces as 502 with the upstream status.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "broken", http.StatusConflict)
+	}))
+	defer srv.Close()
+	rec := upload(t, p, "&url="+url.QueryEscape(srv.URL))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("upstream 409: status = %d, want 502", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "409") || !strings.Contains(body, "broken") {
+		t.Fatalf("error body = %q, want upstream status and snippet", body)
+	}
+}
+
 func TestFilesConcurrentSamePath(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "shared.txt")
