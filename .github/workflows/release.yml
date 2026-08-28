@@ -1,12 +1,61 @@
-name: release
+name: CI and release
 
 on:
+  pull_request:
   push:
     branches: ["main"]
     tags: ["*"]
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: setup-go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: setup-bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: frontend-install
+        working-directory: controller/web
+        run: bun install --frozen-lockfile
+
+      - name: frontend-typecheck-and-build
+        working-directory: controller/web
+        run: bun run typecheck && bun run build
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go-vet
+        run: go vet ./...
+
+      - name: go-test
+        run: go test ./...
+
+      - name: go-test-race
+        run: go test -race ./...
+
+      - name: go-build
+        run: go build ./...
+
   build:
+    if: github.event_name == 'push'
+    needs: quality
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -17,7 +66,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: docker-setup
         uses: docker/setup-buildx-action@v3
