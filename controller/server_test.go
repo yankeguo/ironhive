@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -22,13 +23,11 @@ func testServerWithPods(t *testing.T) *Server {
 	return NewServer(nil, cfg, m)
 }
 
-func postJSON(t *testing.T, url string, body any) *http.Response {
+// postForm POSTs urlencoded form values, the way the controller's POST
+// endpoints expect their parameters.
+func postForm(t *testing.T, rawURL string, form url.Values) *http.Response {
 	t.Helper()
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(data)))
+	resp, err := http.PostForm(rawURL, form)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +36,7 @@ func postJSON(t *testing.T, url string, body any) *http.Response {
 
 func allocateViaHTTP(t *testing.T, base string) string {
 	t.Helper()
-	resp := postJSON(t, base+"/controller/v1/allocate", map[string]string{"pool": "default"})
+	resp := postForm(t, base+"/controller/v1/allocate", url.Values{"pool": {"default"}})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("allocate: status %d", resp.StatusCode)
@@ -60,24 +59,31 @@ func TestAllocateReleaseEndpoints(t *testing.T) {
 
 	name := allocateViaHTTP(t, srv.URL)
 
-	resp := postJSON(t, srv.URL+"/controller/v1/release", map[string]string{"sandbox": name})
+	resp := postForm(t, srv.URL+"/controller/v1/release", url.Values{"sandbox": {name}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("release: status %d", resp.StatusCode)
 	}
 
 	// Releasing the same sandbox again is a 404.
-	resp = postJSON(t, srv.URL+"/controller/v1/release", map[string]string{"sandbox": name})
+	resp = postForm(t, srv.URL+"/controller/v1/release", url.Values{"sandbox": {name}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("re-release: status %d, want 404", resp.StatusCode)
 	}
 
-	// An unknown pool is a 400.
-	resp = postJSON(t, srv.URL+"/controller/v1/allocate", map[string]string{"pool": "nope"})
+	// Parameters may also ride in the query string.
+	resp = postForm(t, srv.URL+"/controller/v1/allocate?pool=nope", nil)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("allocate unknown pool: status %d, want 400", resp.StatusCode)
+		t.Fatalf("allocate unknown pool via query: status %d, want 400", resp.StatusCode)
+	}
+
+	// A missing pool parameter is a 400.
+	resp = postForm(t, srv.URL+"/controller/v1/allocate", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("allocate without pool: status %d, want 400", resp.StatusCode)
 	}
 }
 
@@ -85,13 +91,13 @@ func TestEndpointsWithoutPodManager(t *testing.T) {
 	srv := httptest.NewServer(NewServer(nil, testPoolConfig(1), nil).Handler())
 	defer srv.Close()
 
-	resp := postJSON(t, srv.URL+"/controller/v1/allocate", map[string]string{"pool": "default"})
+	resp := postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"pool": {"default"}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("allocate: status %d, want 503", resp.StatusCode)
 	}
 
-	resp = postJSON(t, srv.URL+"/controller/v1/release", map[string]string{"sandbox": "sandbox-x"})
+	resp = postForm(t, srv.URL+"/controller/v1/release", url.Values{"sandbox": {"sandbox-x"}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("release: status %d, want 503", resp.StatusCode)

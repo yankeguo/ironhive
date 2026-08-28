@@ -74,8 +74,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("OK"))
+	writeJSON(w, http.StatusOK, map[string]string{"message": "OK"})
 }
 
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -99,20 +98,24 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 }
 
 // handleAllocate hands one Ready standby pod of the requested pool to the
-// caller, blocking up to allocateWait for one to become available.
+// caller, blocking up to allocateWait for one to become available. The pool
+// name is read from the query string or a urlencoded body, like the
+// agent's POST endpoints.
 func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	if s.Pods == nil {
 		writeError(w, http.StatusServiceUnavailable, "pod manager disabled")
 		return
 	}
-	var req struct {
-		Pool string `json:"pool"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	params, ok := formParams(w, r)
+	if !ok {
 		return
 	}
-	st, err := s.Pods.Allocate(r.Context(), req.Pool, allocateWait)
+	pool := params.Get("pool")
+	if pool == "" {
+		writeError(w, http.StatusBadRequest, "missing pool")
+		return
+	}
+	st, err := s.Pods.Allocate(r.Context(), pool, allocateWait)
 	switch {
 	case errors.Is(err, ErrUnknownPool):
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -126,27 +129,30 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRelease destroys an allocated pod; the pool is topped up with a
-// fresh standby pod asynchronously.
+// fresh standby pod asynchronously. The sandbox name is read from the
+// query string or a urlencoded body, like the agent's POST endpoints.
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	if s.Pods == nil {
 		writeError(w, http.StatusServiceUnavailable, "pod manager disabled")
 		return
 	}
-	var req struct {
-		Sandbox string `json:"sandbox"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	params, ok := formParams(w, r)
+	if !ok {
 		return
 	}
-	err := s.Pods.Release(r.Context(), req.Sandbox)
+	name := params.Get("sandbox")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "missing sandbox")
+		return
+	}
+	err := s.Pods.Release(r.Context(), name)
 	switch {
 	case errors.Is(err, ErrSandboxNotFound), errors.Is(err, ErrSandboxNotAllocated):
 		writeError(w, http.StatusNotFound, err.Error())
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	default:
-		writeJSON(w, http.StatusOK, map[string]string{"released": req.Sandbox})
+		writeJSON(w, http.StatusOK, map[string]string{"released": name})
 	}
 }
 
@@ -192,6 +198,18 @@ func (s *Server) defaultAgentURL(st PodState) string {
 	return "http://" + net.JoinHostPort(st.IP, strconv.Itoa(port))
 }
 
+// formParams parses and returns the merged query and urlencoded form-body
+// parameters of a POST request — both are allowed, and body entries take
+// precedence over query entries on conflicts. On failure it writes the
+// error response and returns ok == false.
+func formParams(w http.ResponseWriter, r *http.Request) (url.Values, bool) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid form: "+err.Error())
+		return nil, false
+	}
+	return r.Form, true
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -199,5 +217,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeJSON(w, status, map[string]string{"message": message})
 }
