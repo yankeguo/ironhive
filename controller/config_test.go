@@ -32,6 +32,12 @@ pools:
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.HTTP.Listen != DefaultListen {
+		t.Fatalf("http.listen = %q, want %q", cfg.HTTP.Listen, DefaultListen)
+	}
+	if cfg.Kubernetes.Namespace != DefaultNamespace() {
+		t.Fatalf("kubernetes.namespace = %q, want %q", cfg.Kubernetes.Namespace, DefaultNamespace())
+	}
 	pool, ok := cfg.Pools["default"]
 	if !ok {
 		t.Fatalf("pools = %v", cfg.Pools)
@@ -49,6 +55,11 @@ pools:
 
 func TestLoadConfigExplicitValues(t *testing.T) {
 	p := writeConfig(t, `
+http:
+  listen: ":9091"
+kubernetes:
+  kubeconfig: /etc/kube/admin.conf
+  namespace: sandboxes
 pools:
   heavy:
     standby:
@@ -68,6 +79,15 @@ pools:
 	cfg, err := LoadConfig(p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.HTTP.Listen != ":9091" {
+		t.Fatalf("http.listen = %q", cfg.HTTP.Listen)
+	}
+	if cfg.Kubernetes.Kubeconfig != "/etc/kube/admin.conf" {
+		t.Fatalf("kubernetes.kubeconfig = %q", cfg.Kubernetes.Kubeconfig)
+	}
+	if cfg.Kubernetes.Namespace != "sandboxes" {
+		t.Fatalf("kubernetes.namespace = %q", cfg.Kubernetes.Namespace)
 	}
 	pool := cfg.Pools["heavy"]
 	if pool.Standby.Static.Count != 3 {

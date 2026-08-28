@@ -44,7 +44,7 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 
 - std `net/http` only; Go 1.22+ method+path mux patterns. No web framework, no router dependency.
 - One `_test.go` per source file, same package. Kubernetes code is tested with `k8s.io/client-go/kubernetes/fake`; HTTP handlers with `httptest`. The `agent/` package is the style benchmark.
-- Controller flags come in pairs: `-flag` / `IHC_*` env vars, resolved with `envOr`. The agent takes command-line flags only — no env vars by design.
+- The controller takes exactly one flag/env pair — `-config` / `IHC_CONFIG`; every other setting (`http.listen`, `kubernetes.kubeconfig`, `kubernetes.namespace`, pools) lives in the config file, grouped in `http:` / `kubernetes:` / `pools:` sections. The agent takes command-line flags only — no env vars by design.
 - Graceful shutdown: `signal.NotifyContext` for SIGINT/SIGTERM, second signal kills, `srv.Shutdown` with no deadline.
 - Comments explain *why*, matching the density of the surrounding file.
 

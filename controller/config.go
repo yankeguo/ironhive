@@ -12,12 +12,35 @@ import (
 const (
 	DefaultStandbyStaticCount = 10
 	DefaultAgentPort          = 19173
+	DefaultListen             = ":8080"
 )
 
-// Config is the controller's config.yml.
+// Config is the controller's config.yml: an `http` section, a
+// `kubernetes` section, and the container `pools`.
 type Config struct {
+	// HTTP configures the controller's own HTTP server.
+	HTTP HTTPConfig `json:"http"`
+	// Kubernetes configures access to the cluster hosting the managed
+	// pods.
+	Kubernetes KubernetesConfig `json:"kubernetes"`
 	// Pools maps pool names to their configuration.
 	Pools map[string]PoolConfig `json:"pools"`
+}
+
+// HTTPConfig is the `http` section.
+type HTTPConfig struct {
+	// Listen is the HTTP listen address.
+	Listen string `json:"listen"`
+}
+
+// KubernetesConfig is the `kubernetes` section.
+type KubernetesConfig struct {
+	// Kubeconfig is an explicit kubeconfig path; empty selects the
+	// standard loading rules with the in-cluster config as fallback.
+	Kubeconfig string `json:"kubeconfig"`
+	// Namespace is where managed pods live; empty selects the in-cluster
+	// service-account namespace, else "default".
+	Namespace string `json:"namespace"`
 }
 
 // PoolConfig describes one pool of managed containers.
@@ -74,7 +97,21 @@ func LoadConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// NewConfig returns a Config with all defaults applied and no pools, for
+// running without a config file.
+func NewConfig() *Config {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	return cfg
+}
+
 func (c *Config) applyDefaults() {
+	if c.HTTP.Listen == "" {
+		c.HTTP.Listen = DefaultListen
+	}
+	if c.Kubernetes.Namespace == "" {
+		c.Kubernetes.Namespace = DefaultNamespace()
+	}
 	for name, p := range c.Pools {
 		if p.Standby.Static.Count == 0 {
 			p.Standby.Static.Count = DefaultStandbyStaticCount

@@ -16,26 +16,20 @@ import (
 )
 
 func main() {
-	listen := envOr("IHC_LISTEN", ":8080")
-	kubeconfig := envOr("IHC_KUBECONFIG", "")
 	config := envOr("IHC_CONFIG", "config.yml")
-	namespace := envOr("IHC_NAMESPACE", controller.DefaultNamespace())
-	flag.StringVar(&listen, "listen", listen, "http listen address")
-	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig,
-		"kubeconfig path; defaults to the standard loading rules, with in-cluster config as fallback")
 	flag.StringVar(&config, "config", config, "config file path")
-	flag.StringVar(&namespace, "namespace", namespace, "namespace managed pods live in")
 	flag.Parse()
 
-	// The config file is optional while nothing consumes it yet: absent is
-	// fine, present but invalid is a hard failure — misconfiguration must
-	// not boot silently.
+	// The config file carries every setting except its own path: absent
+	// is fine (defaults, no pools), present but invalid is a hard
+	// failure — misconfiguration must not boot silently.
 	cfg, err := controller.LoadConfig(config)
 	switch {
 	case err == nil:
 		log.Printf("config loaded from %s: %d pool(s)", config, len(cfg.Pools))
 	case errors.Is(err, fs.ErrNotExist):
-		log.Println("no config file at", config, "— running without pools")
+		log.Println("no config file at", config, "— running with defaults and no pools")
+		cfg = controller.NewConfig()
 	default:
 		log.Println("config:", err)
 		os.Exit(1)
@@ -43,7 +37,7 @@ func main() {
 
 	// The Kubernetes client is best-effort at startup: without it the web
 	// UI still serves, and the absence is loud in the logs.
-	kube, source, err := controller.NewKubernetesClient(kubeconfig)
+	kube, source, err := controller.NewKubernetesClient(cfg.Kubernetes.Kubeconfig)
 	if err != nil {
 		log.Println("kubernetes client unavailable:", err)
 	} else {
@@ -53,19 +47,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// The pod manager keeps standby pods warm; like the client and config
-	// it is best-effort — without either one the web UI still serves.
+	// The pod manager keeps standby pods warm; like the client it is
+	// best-effort — without pools or a cluster the web UI still serves.
 	var pm *controller.PodManager
-	if kube != nil && cfg != nil {
-		pm = controller.NewPodManager(kube, namespace, cfg)
+	if kube != nil && len(cfg.Pools) > 0 {
+		pm = controller.NewPodManager(kube, cfg.Kubernetes.Namespace, cfg)
 		go pm.Run(ctx)
-		log.Printf("pod manager started in namespace %s", namespace)
+		log.Printf("pod manager started in namespace %s", cfg.Kubernetes.Namespace)
 	} else {
-		log.Println("pod manager disabled: no config file or no kubernetes client")
+		log.Println("pod manager disabled: no pools configured or no kubernetes client")
 	}
 
 	srv := &http.Server{
-		Addr:              listen,
+		Addr:              cfg.HTTP.Listen,
 		Handler:           controller.NewServer(kube, cfg, pm).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -73,7 +67,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Println("listening on", listen)
+		log.Println("listening on", cfg.HTTP.Listen)
 		errCh <- srv.ListenAndServe()
 	}()
 

@@ -23,7 +23,8 @@ type Server struct {
 	// Kubernetes is the client for the cluster hosting the managed
 	// containers; nil when no credentials were resolvable at startup.
 	Kubernetes kubernetes.Interface
-	// Config is the loaded config.yml; nil when no config file was found.
+	// Config is the loaded config.yml, or the default config when no
+	// config file was found; never nil.
 	Config *Config
 	// Pods tracks the managed pods and hands them out; nil when the pod
 	// manager is disabled (no config or no cluster).
@@ -190,10 +191,8 @@ func (s *Server) handleAgentProxy(w http.ResponseWriter, r *http.Request) {
 // defaultAgentURL targets the agent's listen address inside the pod.
 func (s *Server) defaultAgentURL(st PodState) string {
 	port := DefaultAgentPort
-	if s.Config != nil {
-		if pool, ok := s.Config.Pools[st.Pool]; ok {
-			port = pool.Agent.Port
-		}
+	if pool, ok := s.Config.Pools[st.Pool]; ok {
+		port = pool.Agent.Port
 	}
 	return "http://" + net.JoinHostPort(st.IP, strconv.Itoa(port))
 }

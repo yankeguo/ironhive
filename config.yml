@@ -1,18 +1,31 @@
 # ironhive controller configuration.
-#
-# pools.<name>            — a named pool of managed containers
-#   .standby.static.count — warm pods kept ready to assign (default 10)
-#   .podTemplate          — Kubernetes pod template the pool's pods are
-#                           created from; labels and annotations may be
-#                           set but are rarely needed — the controller
-#                           merges them with its own enforced entries
-#   .agent.port           — port ironhive-agent listens on in the pod
-#                           (default 19173)
+
+# http — the controller's own HTTP server.
+http:
+  # listen — HTTP listen address (default :8080).
+  listen: ":8080"
+
+# kubernetes — access to the cluster hosting the managed pods.
+kubernetes:
+  # kubeconfig — explicit kubeconfig path; unset resolves the standard
+  # loading rules ($KUBECONFIG, ~/.kube/config), with the in-cluster
+  # config as fallback.
+  # kubeconfig: /etc/kube/admin.conf
+  # namespace — namespace managed pods live in (default: the in-cluster
+  # service-account namespace, else "default").
+  namespace: ironhive
+
+# pools.<name> — a named pool of managed containers.
 pools:
   default:
+    # standby — how many warm pods are kept ready to assign.
     standby:
+      # static — a fixed number (default 10).
       static:
         count: 10
+    # podTemplate — Kubernetes pod template the pool's pods are created
+    # from; labels and annotations may be set but are rarely needed —
+    # the controller merges them with its own enforced entries.
     podTemplate:
       spec:
         # Boot an arbitrary user image under ironhive-agent: the init
@@ -40,5 +53,7 @@ pools:
             volumeMounts:
               - name: ironhive-bin
                 mountPath: /.ironhive/bin
+    # agent — the ironhive-agent endpoint inside each pod.
     agent:
+      # port — port the agent listens on (default 19173).
       port: 19173

@@ -29,7 +29,7 @@ func DefaultNamespace() string {
 
 // NewKubernetesClient builds a clientset, resolving credentials in order:
 //
-//  1. an explicit kubeconfig path (flag / IHC_KUBECONFIG),
+//  1. an explicit kubeconfig path (the config file's `kubernetes.kubeconfig`),
 //  2. the default loading rules ($KUBECONFIG, then ~/.kube/config),
 //  3. the in-cluster service-account config — the fallback for running
 //     inside a pod, which needs no configuration at all.
