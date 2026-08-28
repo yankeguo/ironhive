@@ -67,12 +67,12 @@ func ShellPostHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		command := r.PostFormValue("command")
 		if command == "" {
-			http.Error(w, "missing form field: command", http.StatusBadRequest)
+			writeError(w, "missing form field: command", http.StatusBadRequest)
 			return
 		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			writeError(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -83,7 +83,7 @@ func ShellPostHandler() http.HandlerFunc {
 
 		state, err := shellState()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		cmd := exec.CommandContext(r.Context(), "bash", "-c", buildShellWrapper(command))
@@ -101,12 +101,12 @@ func ShellPostHandler() http.HandlerFunc {
 		)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if err := cmd.Start(); err != nil {

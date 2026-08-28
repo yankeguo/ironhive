@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -13,6 +14,20 @@ import (
 	"strings"
 	"sync"
 )
+
+// writeMessage answers with status code and a JSON body of the form
+// {"message": msg}. All non-data responses (successes and errors) use
+// this envelope so fields can be added later without breaking clients.
+func writeMessage(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
+}
+
+// writeError is the JSON drop-in replacement for http.Error.
+func writeError(w http.ResponseWriter, msg string, code int) {
+	writeMessage(w, code, msg)
+}
 
 // resolveFilePath returns p as an absolute, cleaned path, resolving
 // relative paths against the process working directory.
@@ -47,12 +62,12 @@ func lockPath(p string) func() {
 func requirePath(w http.ResponseWriter, r *http.Request) (p string, unlock func(), ok bool) {
 	raw := r.URL.Query().Get("path")
 	if raw == "" {
-		http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+		writeError(w, "missing query parameter: path", http.StatusBadRequest)
 		return "", nil, false
 	}
 	p, err := resolveFilePath(raw)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err.Error(), http.StatusInternalServerError)
 		return "", nil, false
 	}
 	return p, lockPath(p), true
@@ -71,20 +86,20 @@ func FilesGetHandler() http.HandlerFunc {
 		f, err := os.Open(p)
 		if err != nil {
 			if os.IsNotExist(err) {
-				http.Error(w, "not found: "+p, http.StatusNotFound)
+				writeError(w, "not found: "+p, http.StatusNotFound)
 			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
 		defer f.Close()
 		st, err := f.Stat()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if st.IsDir() {
-			http.Error(w, "is a directory: "+p, http.StatusBadRequest)
+			writeError(w, "is a directory: "+p, http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": st.Name()}))
@@ -109,7 +124,7 @@ func FilesPutHandler() http.HandlerFunc {
 		q := r.URL.Query()
 		p := q.Get("path")
 		if p == "" {
-			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+			writeError(w, "missing query parameter: path", http.StatusBadRequest)
 			return
 		}
 		// Validate options before touching the filesystem.
@@ -117,7 +132,7 @@ func FilesPutHandler() http.HandlerFunc {
 		if s := q.Get("chmod"); s != "" {
 			m, err := parseChmod(s)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			mode = m
@@ -126,7 +141,7 @@ func FilesPutHandler() http.HandlerFunc {
 		if s := q.Get("chown"); s != "" {
 			u, g, err := parseChown(s)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			uid, gid = u, g
@@ -134,7 +149,7 @@ func FilesPutHandler() http.HandlerFunc {
 		rawURL := q.Get("url")
 		if rawURL != "" {
 			if err := validatePutURL(rawURL); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
@@ -151,14 +166,14 @@ func FilesPutHandler() http.HandlerFunc {
 		defer src.Close()
 		// Parent directories are created automatically, like mkdir -p.
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		// Write to a temp file in the same directory (same filesystem, so
 		// the rename below is atomic), then rename it over the target.
 		f, err := os.CreateTemp(filepath.Dir(p), ".ironhive-upload-*")
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		tmpName := f.Name()
@@ -167,39 +182,38 @@ func FilesPutHandler() http.HandlerFunc {
 		defer os.Remove(tmpName)
 		if _, err := io.Copy(f, src); err != nil {
 			f.Close()
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		// chown first: it may clear setuid/setgid bits set by chmod.
 		if uid >= 0 || gid >= 0 {
 			if err := f.Chown(uid, gid); err != nil {
 				f.Close()
-				http.Error(w, "chown: "+err.Error(), http.StatusInternalServerError)
+				writeError(w, "chown: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
 		if err := f.Chmod(mode); err != nil {
 			f.Close()
-			http.Error(w, "chmod: "+err.Error(), http.StatusInternalServerError)
+			writeError(w, "chmod: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		// Flush to disk before the rename, so a crash cannot leave the
 		// target renamed to a file whose content was never persisted.
 		if err := f.Sync(); err != nil {
 			f.Close()
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if err := f.Close(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if err := os.Rename(tmpName, p); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("OK"))
+		writeMessage(w, http.StatusOK, "OK")
 	}
 }
 
@@ -222,17 +236,17 @@ func putSource(w http.ResponseWriter, r *http.Request, rawURL string) (src io.Re
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
 	if err != nil {
-		http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
+		writeError(w, "download: "+err.Error(), http.StatusBadGateway)
 		return nil, false
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		http.Error(w, "download: "+err.Error(), http.StatusBadGateway)
+		writeError(w, "download: "+err.Error(), http.StatusBadGateway)
 		return nil, false
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		http.Error(w, "download: "+resp.Status, http.StatusBadGateway)
+		writeError(w, "download: "+resp.Status, http.StatusBadGateway)
 		return nil, false
 	}
 	return resp.Body, true
@@ -244,11 +258,11 @@ func putSource(w http.ResponseWriter, r *http.Request, rawURL string) (src io.Re
 func parseUploadOptions(w http.ResponseWriter, q url.Values) (method, rawURL string, hdrs [][2]string, ok bool) {
 	rawURL = q.Get("url")
 	if rawURL == "" {
-		http.Error(w, "missing query parameter: url", http.StatusBadRequest)
+		writeError(w, "missing query parameter: url", http.StatusBadRequest)
 		return "", "", nil, false
 	}
 	if err := validatePutURL(rawURL); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, err.Error(), http.StatusBadRequest)
 		return "", "", nil, false
 	}
 	method = strings.ToUpper(q.Get("method"))
@@ -258,13 +272,13 @@ func parseUploadOptions(w http.ResponseWriter, q url.Values) (method, rawURL str
 	switch method {
 	case http.MethodPut, http.MethodPost, http.MethodPatch:
 	default:
-		http.Error(w, "invalid method: must be PUT, POST or PATCH", http.StatusBadRequest)
+		writeError(w, "invalid method: must be PUT, POST or PATCH", http.StatusBadRequest)
 		return "", "", nil, false
 	}
 	for _, h := range q["headers"] {
 		k, v, found := strings.Cut(h, "=")
 		if !found || k == "" {
-			http.Error(w, fmt.Sprintf("invalid headers entry %q: must be key=value", h), http.StatusBadRequest)
+			writeError(w, fmt.Sprintf("invalid headers entry %q: must be key=value", h), http.StatusBadRequest)
 			return "", "", nil, false
 		}
 		hdrs = append(hdrs, [2]string{k, v})
@@ -279,7 +293,7 @@ func parseUploadOptions(w http.ResponseWriter, q url.Values) (method, rawURL str
 func uploadStream(w http.ResponseWriter, r *http.Request, method, rawURL string, hdrs [][2]string, contentType string, body io.Reader, size int64) bool {
 	req, err := http.NewRequestWithContext(r.Context(), method, rawURL, body)
 	if err != nil {
-		http.Error(w, "upload: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, "upload: "+err.Error(), http.StatusInternalServerError)
 		return false
 	}
 	if size >= 0 {
@@ -293,7 +307,7 @@ func uploadStream(w http.ResponseWriter, r *http.Request, method, rawURL string,
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		http.Error(w, "upload: "+err.Error(), http.StatusBadGateway)
+		writeError(w, "upload: "+err.Error(), http.StatusBadGateway)
 		return false
 	}
 	defer resp.Body.Close()
@@ -304,11 +318,10 @@ func uploadStream(w http.ResponseWriter, r *http.Request, method, rawURL string,
 		if s := strings.TrimSpace(string(snippet)); s != "" {
 			msg += ": " + s
 		}
-		http.Error(w, msg, http.StatusBadGateway)
+		writeError(w, msg, http.StatusBadGateway)
 		return false
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("OK"))
+	writeMessage(w, http.StatusOK, "OK")
 	return true
 }
 
@@ -334,20 +347,20 @@ func FilesUploadHandler() http.HandlerFunc {
 		f, err := os.Open(p)
 		if err != nil {
 			if os.IsNotExist(err) {
-				http.Error(w, "not found: "+p, http.StatusNotFound)
+				writeError(w, "not found: "+p, http.StatusNotFound)
 			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
 		defer f.Close()
 		st, err := f.Stat()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if st.IsDir() {
-			http.Error(w, "is a directory: "+p, http.StatusBadRequest)
+			writeError(w, "is a directory: "+p, http.StatusBadRequest)
 			return
 		}
 		uploadStream(w, r, method, rawURL, hdrs, "", f, st.Size())

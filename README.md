@@ -34,7 +34,7 @@ As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so t
 
 | Endpoint | Description |
 |---|---|
-| `GET /healthz` | Liveness probe, returns `OK` |
+| `GET /healthz` | Liveness probe, returns `{"message":"OK"}` |
 | `GET /v1/file?path=` | Download a file as an attachment (`Range` supported). `path` may be absolute, or relative to the process working directory |
 | `PUT /v1/file?path=` | Upload a file **atomically**: the body lands in a temp file in the target directory, then is renamed over the target; missing parent directories are created automatically. With `url=` (http/https) the body is expected to be empty and the content is downloaded from that URL instead, with the same atomic write. Optional `chmod` (zero-prefixed octal, e.g. `0644`) and `chown` (`user:group`; names or numeric ids, either side omittable, e.g. `user`, `:group`, `1000:1000`) |
 | `POST /v1/file/upload?path=&url=` | Stream the local file at `path` as the request body to `url` (http/https). `method=` selects the outgoing method — only `PUT` / `POST` / `PATCH` (default `POST`); repeatable `headers=` attaches extra headers, each as `key=value`. A non-2xx upstream response is reported as `502` with a body snippet |
@@ -46,6 +46,8 @@ As **PID 1** it reaps orphaned zombies itself (SIGCHLD-driven `wait4(-1)`), so t
 | `POST /v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below) |
 
 File operations on the same absolute path are serialized with a per-path mutex.
+
+Endpoints that do not return data answer with a JSON envelope `{"message": ...}` (successes and errors alike, `Content-Type: application/json`), so fields can be added later without breaking clients.
 
 ### Shell sessions
 

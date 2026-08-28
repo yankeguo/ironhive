@@ -130,7 +130,7 @@ func TarGetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		filter, err := newTarFilter(r.URL.Query())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		p, unlock, ok := requirePath(w, r)
@@ -141,14 +141,14 @@ func TarGetHandler() http.HandlerFunc {
 		st, err := os.Stat(p)
 		if err != nil {
 			if os.IsNotExist(err) {
-				http.Error(w, "not found: "+p, http.StatusNotFound)
+				writeError(w, "not found: "+p, http.StatusNotFound)
 			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
 		if !st.IsDir() {
-			http.Error(w, "not a directory: "+p, http.StatusBadRequest)
+			writeError(w, "not a directory: "+p, http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-tar")
@@ -245,7 +245,7 @@ func TarUploadHandler() http.HandlerFunc {
 		}
 		filter, err := newTarFilter(q)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		p, unlock, ok := requirePath(w, r)
@@ -256,14 +256,14 @@ func TarUploadHandler() http.HandlerFunc {
 		st, err := os.Stat(p)
 		if err != nil {
 			if os.IsNotExist(err) {
-				http.Error(w, "not found: "+p, http.StatusNotFound)
+				writeError(w, "not found: "+p, http.StatusNotFound)
 			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
 		if !st.IsDir() {
-			http.Error(w, "not a directory: "+p, http.StatusBadRequest)
+			writeError(w, "not a directory: "+p, http.StatusBadRequest)
 			return
 		}
 		// Pack and upload concurrently: the goroutine writes the archive
@@ -303,13 +303,13 @@ func TarPutHandler() http.HandlerFunc {
 		rawURL := q.Get("url")
 		if rawURL != "" {
 			if err := validatePutURL(rawURL); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
 		filter, err := newTarFilter(q)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		p, unlock, ok := requirePath(w, r)
@@ -323,19 +323,18 @@ func TarPutHandler() http.HandlerFunc {
 		}
 		defer src.Close()
 		if err := os.MkdirAll(p, 0o755); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if err := extractTar(src, p, filter); err != nil {
 			if errors.Is(err, errBadTar) {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("OK"))
+		writeMessage(w, http.StatusOK, "OK")
 	}
 }
 

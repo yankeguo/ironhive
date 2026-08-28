@@ -33,11 +33,11 @@ func DirGetHandler() http.HandlerFunc {
 		if err != nil {
 			switch {
 			case os.IsNotExist(err):
-				http.Error(w, "not found: "+p, http.StatusNotFound)
+				writeError(w, "not found: "+p, http.StatusNotFound)
 			case errors.Is(err, syscall.ENOTDIR):
-				http.Error(w, "not a directory: "+p, http.StatusBadRequest)
+				writeError(w, "not a directory: "+p, http.StatusBadRequest)
 			default:
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
@@ -45,7 +45,7 @@ func DirGetHandler() http.HandlerFunc {
 		for _, e := range entries {
 			info, err := e.Info()
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			out = append(out, dirEntry{
@@ -73,14 +73,14 @@ func DirPutHandler() http.HandlerFunc {
 		q := r.URL.Query()
 		p := q.Get("path")
 		if p == "" {
-			http.Error(w, "missing query parameter: path", http.StatusBadRequest)
+			writeError(w, "missing query parameter: path", http.StatusBadRequest)
 			return
 		}
 		mode := os.FileMode(0o755)
 		if s := q.Get("chmod"); s != "" {
 			m, err := parseChmod(s)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			mode = m
@@ -89,7 +89,7 @@ func DirPutHandler() http.HandlerFunc {
 		if s := q.Get("chown"); s != "" {
 			u, g, err := parseChown(s)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			uid, gid = u, g
@@ -100,7 +100,7 @@ func DirPutHandler() http.HandlerFunc {
 		}
 		defer unlock()
 		if err := os.MkdirAll(p, mode); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		// MkdirAll only applies mode to newly created directories (and
@@ -108,15 +108,14 @@ func DirPutHandler() http.HandlerFunc {
 		// first as it may clear mode bits.
 		if uid >= 0 || gid >= 0 {
 			if err := os.Chown(p, uid, gid); err != nil {
-				http.Error(w, "chown: "+err.Error(), http.StatusInternalServerError)
+				writeError(w, "chown: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
 		if err := os.Chmod(p, mode); err != nil {
-			http.Error(w, "chmod: "+err.Error(), http.StatusInternalServerError)
+			writeError(w, "chmod: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("OK"))
+		writeMessage(w, http.StatusOK, "OK")
 	}
 }
