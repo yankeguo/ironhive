@@ -28,6 +28,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /v1/file", runtime.FilesGetHandler())
 	mux.HandleFunc("PUT /v1/file", runtime.FilesPutHandler())
+	mux.HandleFunc("GET /v1/tar", runtime.TarGetHandler())
 	mux.HandleFunc("PUT /v1/tar", runtime.TarPutHandler())
 	mux.HandleFunc("GET /v1/dir", runtime.DirGetHandler())
 	mux.HandleFunc("PUT /v1/dir", runtime.DirPutHandler())
