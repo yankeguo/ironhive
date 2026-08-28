@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -125,6 +126,10 @@ func TestProcParentPID(t *testing.T) {
 }
 
 func TestDirectChildrenValidatesPIDNamespace(t *testing.T) {
+	// directChildren reads procfs, which only exists on Linux.
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs is Linux-only")
+	}
 	if _, err := directChildren(os.Getpid()); err != nil {
 		t.Fatalf("current procfs rejected: %v", err)
 	}
