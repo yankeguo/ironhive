@@ -534,8 +534,120 @@ func TestReconcileDeleteUsesSnapshotResourceVersion(t *testing.T) {
 	if gotRV != "17" {
 		t.Fatalf("delete resourceVersion = %q, want 17", gotRV)
 	}
-	if _, ok := m.Lookup(st.Name); !ok {
+	cached, ok := m.Lookup(st.Name)
+	if !ok {
 		t.Fatal("conflicted sweep removed the pod from cache")
+	}
+	if cached.Allocated {
+		t.Fatal("conflicted sweep did not refresh the cache from the API")
+	}
+}
+
+func TestReconcileFreshUsesAuthoritativeList(t *testing.T) {
+	cfg := testPoolConfig(1)
+	existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:            "sandbox-existing",
+		Namespace:       "ironhive",
+		ResourceVersion: "9",
+		Labels: map[string]string{
+			LabelManagedBy:    ManagedByValue,
+			LabelPool:         "default",
+			LabelTemplateHash: podTemplateHash(cfg.Pools["default"].PodTemplate),
+		},
+	}}
+	kube := fake.NewSimpleClientset(existing)
+	m := NewPodManager(kube, "ironhive", cfg)
+
+	// Simulate a newly promoted replica whose watch cache has not observed
+	// the previous leader's existing standby yet.
+	m.reconcileFresh(context.Background())
+	pods, err := kube.CoreV1().Pods("ironhive").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].Name != existing.Name {
+		t.Fatalf("authoritative reconcile produced pods %+v", pods.Items)
+	}
+}
+
+func TestPatchPodDoesNotResurrectDeletedCacheEntry(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "sandbox-a",
+		Namespace: "ironhive",
+		Labels:    map[string]string{LabelManagedBy: ManagedByValue, LabelPool: "default"},
+	}}
+	kube := fake.NewSimpleClientset(pod)
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	if _, err := m.list(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	kube.Fake.PrependReactor("patch", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		close(started)
+		<-release
+		return false, nil, nil
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.patchPod(context.Background(), pod.Name,
+			`{"metadata":{"annotations":{"ironhive.dev/allocated":"now"}}}`)
+		errCh <- err
+	}()
+	<-started
+	m.applyEvent(watch.Event{Type: watch.Deleted, Object: pod})
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Lookup(pod.Name); ok {
+		t.Fatal("out-of-order patch response resurrected a deleted pod")
+	}
+}
+
+func TestPatchPodDoesNotOverwriteAdvancedCacheEntry(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "sandbox-a",
+		Namespace: "ironhive",
+		Labels:    map[string]string{LabelManagedBy: ManagedByValue, LabelPool: "default"},
+		Annotations: map[string]string{
+			AnnotationAllocated:    "old",
+			AnnotationLeaseExpires: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
+		},
+	}}
+	kube := fake.NewSimpleClientset(pod)
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	if _, err := m.list(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	kube.Fake.PrependReactor("patch", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		close(started)
+		<-release
+		return false, nil, nil
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.patchPod(context.Background(), pod.Name,
+			`{"metadata":{"annotations":{"ironhive.dev/lease-expires":"2030-01-01T00:00:00Z"}}}`)
+		errCh <- err
+	}()
+	<-started
+	advanced := pod.DeepCopy()
+	advanced.ResourceVersion = "99"
+	advanced.Annotations[AnnotationLeaseExpires] = "2040-01-01T00:00:00Z"
+	m.applyEvent(watch.Event{Type: watch.Modified, Object: advanced})
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	cached, ok := m.Lookup(pod.Name)
+	if !ok {
+		t.Fatal("advanced cache entry disappeared")
+	}
+	if cached.ResourceVersion != "99" || cached.LeaseExpires.Year() != 2040 {
+		t.Fatalf("cache regressed to %+v", cached)
 	}
 }
 

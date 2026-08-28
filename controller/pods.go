@@ -148,13 +148,11 @@ func (m *PodManager) Run(ctx context.Context) {
 	}
 }
 
-// RunReconcile reconciles immediately and then periodically until ctx is
-// cancelled. It must run on at most one replica at a time — the leader
-// election in RunLeaderElection enforces that, making reconcile the
-// single writer of the pool's standby set: no over-creation, and
-// template-hash recycling converges without racing.
+// RunReconcile lists authoritatively, reconciles immediately and repeats
+// periodically until ctx is cancelled. It must run on at most one replica
+// at a time — leader election makes it the standby set's single writer.
 func (m *PodManager) RunReconcile(ctx context.Context) {
-	m.reconcile(ctx)
+	m.reconcileFresh(ctx)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -162,7 +160,7 @@ func (m *PodManager) RunReconcile(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.reconcile(ctx)
+			m.reconcileFresh(ctx)
 		}
 	}
 }
@@ -170,11 +168,9 @@ func (m *PodManager) RunReconcile(ctx context.Context) {
 // list replaces the in-memory state with a fresh list of managed pods and
 // returns the list's resourceVersion for the following watch.
 func (m *PodManager) list(ctx context.Context) (string, error) {
-	list, err := m.kube.CoreV1().Pods(m.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: podSelector,
-	})
+	list, err := m.fetchPods(ctx)
 	if err != nil {
-		return "", fmt.Errorf("list pods: %w", err)
+		return "", err
 	}
 	fresh := make(map[string]*PodState, len(list.Items))
 	for i := range list.Items {
@@ -186,6 +182,16 @@ func (m *PodManager) list(ctx context.Context) (string, error) {
 	m.mu.Unlock()
 	m.initialListOnce.Do(func() { close(m.initialList) })
 	return list.ResourceVersion, nil
+}
+
+func (m *PodManager) fetchPods(ctx context.Context) (*corev1.PodList, error) {
+	list, err := m.kube.CoreV1().Pods(m.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: podSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+	return list, nil
 }
 
 // waitForInitialList keeps a replica out of leader election until its cache
@@ -256,21 +262,43 @@ func readyStandby(p PodState) bool {
 	return p.Phase == corev1.PodRunning && p.Ready && p.IP != ""
 }
 
-// reconcile makes each pool converge on its exact standby count and sweeps
-// terminated pods, expired leases and stale templates. Failures are logged
-// and retried on the next pass.
+// reconcile uses an immutable cache snapshot for focused in-memory passes.
+// Production leader reconciliation uses reconcileFresh below.
 func (m *PodManager) reconcile(ctx context.Context) {
+	m.reconcileStates(ctx, m.Pods())
+}
+
+// reconcileFresh bases every leader write pass on one authoritative List.
+// The watch cache is optimized for reads and can lag during failover; using
+// it to create pods could permanently over-size a pool.
+func (m *PodManager) reconcileFresh(ctx context.Context) {
+	list, err := m.fetchPods(ctx)
+	if err != nil {
+		log.Println("pod manager: reconcile list:", err)
+		return
+	}
+	pods := make([]PodState, 0, len(list.Items))
+	for i := range list.Items {
+		pods = append(pods, *podStateFrom(&list.Items[i]))
+	}
+	m.reconcileStates(ctx, pods)
+}
+
+// reconcileStates makes each pool converge on its exact standby count and
+// sweeps terminated pods, expired leases and stale templates. Failures are
+// logged and retried on the next pass.
+func (m *PodManager) reconcileStates(ctx context.Context, pods []PodState) {
 	// Precompute the current template hash of every configured pool.
 	hashes := make(map[string]string, len(m.cfg.Pools))
 	for name, pool := range m.cfg.Pools {
 		hashes[name] = podTemplateHash(pool.PodTemplate)
 	}
 
-	m.mu.RLock()
 	standby := make(map[string][]PodState, len(m.cfg.Pools))
 	var sweeps []sweepTarget
 	now := time.Now()
-	for _, p := range m.pods {
+	for i := range pods {
+		p := &pods[i]
 		// A freshly created pod has an empty phase until the API server
 		// fills it in; count anything not terminated as active — except
 		// allocated pods, which are in use and not standby capacity.
@@ -300,7 +328,6 @@ func (m *PodManager) reconcile(ctx context.Context) {
 			standby[p.Pool] = append(standby[p.Pool], *p)
 		}
 	}
-	m.mu.RUnlock()
 
 	// A static count is a target, not a floor. Prefer deleting pods that
 	// cannot be allocated yet, then the newest names, preserving the
@@ -346,6 +373,9 @@ func (m *PodManager) reconcile(ctx context.Context) {
 			log.Println("pod manager: deleted", target.reason, "pod", target.name)
 		case apierrors.IsNotFound(err):
 			m.forgetPod(target.name, "")
+		case apierrors.IsConflict(err):
+			m.refreshPod(ctx, target.name)
+			log.Println("pod manager: delete", target.reason, "pod", target.name, ":", err)
 		default:
 			log.Println("pod manager: delete", target.reason, "pod", target.name, ":", err)
 		}
@@ -365,6 +395,21 @@ func (m *PodManager) reconcile(ctx context.Context) {
 				break
 			}
 		}
+	}
+}
+
+// refreshPod repairs a stale cache entry after a delete precondition loses
+// a race. Without it, an already-consumed watch event could leave every
+// later sweep retry using the same old resourceVersion.
+func (m *PodManager) refreshPod(ctx context.Context, name string) {
+	pod, err := m.kube.CoreV1().Pods(m.namespace).Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		m.applyEvent(watch.Event{Type: watch.Modified, Object: pod})
+	case apierrors.IsNotFound(err):
+		m.forgetPod(name, "")
+	default:
+		log.Println("pod manager: refresh pod", name, ":", err)
 	}
 }
 
@@ -528,6 +573,10 @@ func (m *PodManager) claim(ctx context.Context, st PodState, lease time.Duration
 // the server's truth anyway. A pod deleted concurrently surfaces as
 // ErrSandboxNotFound.
 func (m *PodManager) patchPod(ctx context.Context, name, patch string) (PodState, error) {
+	m.mu.RLock()
+	before := m.pods[name]
+	m.mu.RUnlock()
+
 	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, name,
 		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
 	if err != nil {
@@ -538,12 +587,32 @@ func (m *PodManager) patchPod(ctx context.Context, name, patch string) (PodState
 	}
 	next := podStateFrom(pod)
 	m.mu.Lock()
-	if prev, ok := m.pods[pod.Name]; ok {
-		next.IP = prev.IP
-		next.Phase = prev.Phase
-		next.Ready = prev.Ready
+	current, ok := m.pods[pod.Name]
+	switch {
+	case !ok:
+		// A Deleted watch event won while the request was in flight. Do
+		// not resurrect the cache entry from an older PATCH response.
+	case current == before:
+		next.IP = current.IP
+		next.Phase = current.Phase
+		next.Ready = current.Ready
+		next.Deleting = next.Deleting || current.Deleting
+		m.pods[pod.Name] = next
+	case !current.Deleting && !current.Allocated && next.Allocated:
+		// A status event older than this successful claim may have arrived
+		// while PATCH was in flight. Merge the monotonic allocation facts
+		// into its fresher runtime fields.
+		merged := *current
+		merged.Allocated = true
+		merged.LeaseExpires = next.LeaseExpires
+		merged.ResourceVersion = next.ResourceVersion
+		merged.Deleting = next.Deleting
+		m.pods[pod.Name] = &merged
+	default:
+		// Otherwise another patch/watch already advanced the entry. Its
+		// event (or the next authoritative reconcile List) is the source
+		// of truth, so an out-of-order response must not overwrite it.
 	}
-	m.pods[pod.Name] = next
 	m.mu.Unlock()
 	return *next, nil
 }
