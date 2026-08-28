@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // tarFilter decides which slash-separated, archive-relative names are
@@ -169,10 +170,15 @@ func TarGetHandler() http.HandlerFunc {
 // relative to root, skipping entries rejected by filter. Excluded
 // directories are not descended into; directories not matching a
 // non-empty include list are still descended into, so matching files
-// beneath them are archived.
+// beneath them are archived. A live directory can race with other
+// processes: entries that vanish mid-walk are skipped rather than
+// aborting the archive.
 func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) && path != root {
+				return nil
+			}
 			return err
 		}
 		if path == root {
@@ -195,6 +201,10 @@ func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 		}
 		info, err := d.Info()
 		if err != nil {
+			// Vanished between ReadDir and Info.
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		hdr := &tar.Header{
@@ -211,11 +221,18 @@ func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 			hdr.Size = 0
 			return tw.WriteHeader(hdr)
 		case info.Mode().IsRegular():
-			if err := tw.WriteHeader(hdr); err != nil {
-				return err
-			}
+			// Open before writing the header: a file that vanished since
+			// the walk is skipped whole, never leaving a header without
+			// its body in the archive.
 			f, err := os.Open(path)
 			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				f.Close()
 				return err
 			}
 			_, copyErr := io.Copy(tw, f)
@@ -323,6 +340,11 @@ func TarPutHandler() http.HandlerFunc {
 			return
 		}
 		defer unlock()
+		// An existing non-directory target is a client error, not a 500.
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			writeError(w, "not a directory: "+p, http.StatusBadRequest)
+			return
+		}
 		src, ok := putSource(w, r, rawURL)
 		if !ok {
 			return
@@ -346,10 +368,17 @@ func TarPutHandler() http.HandlerFunc {
 
 func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 	tr := tar.NewReader(rd)
+	// Directory mtimes are restored after the walk, deepest first:
+	// extracting files into a directory bumps its mtime, so parents must
+	// be stamped after their children.
+	var dirStamps []struct {
+		path  string
+		mtime time.Time
+	}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
 			return fmt.Errorf("tar: %w: %v", errBadTar, err)
@@ -371,6 +400,12 @@ func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 			if err := os.Chmod(target, tarPerm(hdr, 0o755)); err != nil {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
 			}
+			if !hdr.ModTime.IsZero() {
+				dirStamps = append(dirStamps, struct {
+					path  string
+					mtime time.Time
+				}{target, hdr.ModTime})
+			}
 		case tar.TypeReg, tar.TypeRegA:
 			if !filter.included(hdr.Name) {
 				continue
@@ -385,6 +420,13 @@ func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 			return fmt.Errorf("tar: %w: unsupported entry type %d (%s)", errBadTar, hdr.Typeflag, hdr.Name)
 		}
 	}
+	// Best effort: content matters more than timestamps. Archive order is
+	// parents before children, so walking the slice backwards stamps the
+	// deepest directories first.
+	for i := len(dirStamps) - 1; i >= 0; i-- {
+		_ = os.Chtimes(dirStamps[i].path, dirStamps[i].mtime, dirStamps[i].mtime)
+	}
+	return nil
 }
 
 // joinTarEntry maps a tar entry name to a path inside dest, rejecting

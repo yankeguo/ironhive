@@ -154,6 +154,12 @@ func FilesPutHandler() http.HandlerFunc {
 				return
 			}
 		}
+		// Renaming over an existing directory would fail late with a
+		// platform-dependent error; report the conflict up front.
+		if st, err := os.Stat(p); err == nil && st.IsDir() {
+			writeError(w, "is a directory: "+p, http.StatusBadRequest)
+			return
+		}
 		// The content source is the request body, unless url is given.
 		src, ok := putSource(w, r, rawURL)
 		if !ok {

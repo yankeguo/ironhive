@@ -161,6 +161,9 @@ func TestFilesPutErrors(t *testing.T) {
 	if rec := put(t, putTarget(filepath.Join(dir, "a"), "&chown=no-such-user-xyz:grp"), "x"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown chown user: status = %d, want 400", rec.Code)
 	}
+	if rec := put(t, putTarget(t.TempDir(), ""), "x"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("existing directory target: status = %d, want 400", rec.Code)
+	}
 	if rec := put(t, putTarget(filepath.Join(dir, "no-such-dir", "deep", "a"), ""), "x"); rec.Code != http.StatusOK {
 		t.Fatalf("missing parent dirs are auto-created: status = %d (%s)", rec.Code, rec.Body)
 	}

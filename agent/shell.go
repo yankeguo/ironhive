@@ -86,7 +86,9 @@ func shellQuote(s string) string {
 // Output streams back as server-sent events:
 //
 //	event: stdout / stderr — data: <json string, one per output line>
-//	event: exit            — data: <json string, exit code>
+//	event: exit            — data: <json string, exit code; 128+signal when
+//	      the command died to a signal, e.g. 143 for SIGTERM; -1 when the
+//	      code could not be determined, e.g. WaitDelay escalation>
 //	event: cwd             — data: <json string, working directory after exit>
 //	event: env             — data: <json object, full environment after exit>
 //	event: error           — data: <json string> (spawn or stream failures)
@@ -281,13 +283,19 @@ func scanSSE(rd io.Reader, event string, ch chan<- sseEvent, wg *sync.WaitGroup)
 	}
 }
 
-// exitCode extracts the process exit code from a cmd.Wait error.
+// exitCode extracts the process exit code from a cmd.Wait error, mapping
+// signal deaths to the shell convention 128+signal (e.g. 143 for SIGTERM),
+// so the harness can tell a killed command apart from a plain failure.
+// It returns -1 when no code is available, e.g. when WaitDelay escalated.
 func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return 128 + int(ws.Signal())
+		}
 		return ee.ExitCode()
 	}
 	return -1

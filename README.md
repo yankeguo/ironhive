@@ -79,7 +79,7 @@ event: env
 data: {"HOME":"/root","PATH":"/usr/bin", ...}
 ```
 
-One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code, then the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
+One `stdout`/`stderr` event per output line, then a final `exit` event with the exit code (128+signal when the command died to a signal, e.g. `143` for SIGTERM), then the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
 
 If the client disconnects, the command's whole **process group** (bash plus any pipeline or subshell children) receives `SIGTERM` — the wrapper's `EXIT` trap still saves the state snapshot — and the process is `SIGKILL`ed after a 5-second grace period. Disconnecting is therefore a reliable cancel; a command whose descendants ignore `SIGTERM` may leave orphans behind, which are reparented to PID 1 and reaped when they eventually die.
 

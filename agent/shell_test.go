@@ -112,6 +112,15 @@ func TestShellExitCode(t *testing.T) {
 	}
 }
 
+func TestShellExitCodeSignal(t *testing.T) {
+	// A signal death is reported as 128+signal, per shell convention.
+	_, events := runShell(t, "kill -TERM $$")
+	exit := eventData[string](t, events, "exit")
+	if len(exit) != 1 || exit[0] != "143" {
+		t.Fatalf("exit events = %v, want 143", exit)
+	}
+}
+
 func TestShellStateless(t *testing.T) {
 	dir := t.TempDir()
 	runShell(t, "cd "+dir+" && export IHR_TEST_MARK=bravo")
@@ -328,5 +337,10 @@ func TestShellCancelTerminatesCommand(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("handler did not return after request cancel")
+	}
+	// The command died to the SIGTERM teardown: 128+15.
+	exit := eventData[string](t, parseSSE(t, rec.Body.String()), "exit")
+	if len(exit) != 1 || exit[0] != "143" {
+		t.Fatalf("exit events = %v, want 143", exit)
 	}
 }

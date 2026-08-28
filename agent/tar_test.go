@@ -87,6 +87,14 @@ func TestTarPutExtract(t *testing.T) {
 	if st.ModTime().UTC().Format(time.DateTime) != "2024-01-02 03:04:05" {
 		t.Fatalf("mtime = %v", st.ModTime())
 	}
+	// Directory mtimes from the archive are restored too.
+	st, err = os.Stat(filepath.Join(dest, "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ModTime().UTC().Format(time.DateTime) != "2024-01-02 03:04:05" {
+		t.Fatalf("dir mtime = %v", st.ModTime())
+	}
 }
 
 func TestTarPutOverwrite(t *testing.T) {
@@ -141,6 +149,14 @@ func TestTarPutErrors(t *testing.T) {
 		{name: "link", typ: tar.TypeSymlink, mode: 0o777},
 	})); rec.Code != http.StatusBadRequest {
 		t.Fatalf("symlink entry: status = %d, want 400", rec.Code)
+	}
+	// The target being an existing file is a client error too.
+	f := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rec := putTar(t, f, &bytes.Buffer{}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("existing file target: status = %d, want 400", rec.Code)
 	}
 }
 
