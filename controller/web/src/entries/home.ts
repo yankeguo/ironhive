@@ -15,6 +15,7 @@ interface PodInfo {
   phase: string
   ready: boolean
   ip?: string
+  deleting?: boolean
   allocated: boolean
   leaseExpires?: string
   createdAt: string
@@ -50,6 +51,7 @@ function fmtLease(until?: string): string {
 
 // statusBadge classifies a pod the same way the pools summary counts it.
 function statusBadge(p: PodInfo): string {
+  if (p.deleting) return '<span class="text-rose-400">terminating</span>'
   if (p.allocated) return '<span class="text-sky-400">allocated</span>'
   if (p.phase === 'Running' && p.ready) return '<span class="text-emerald-400">standby</span>'
   if (p.phase === 'Succeeded' || p.phase === 'Failed') return '<span class="text-neutral-500">terminated</span>'
@@ -63,7 +65,7 @@ function render(data: PoolsResponse): void {
         (p) => `
       <div class="card">
         <div class="card-header flex items-center gap-1.5">
-          <span class="icon-[lucide--boxes]"></span> ${esc(p.name)}
+          <span class="icon-[lucide--boxes]" aria-hidden="true"></span> ${esc(p.name)}
         </div>
         <div class="card-body grid grid-cols-3 gap-2 text-center">
           <div>
@@ -115,13 +117,19 @@ function showBanner(message?: string): void {
   }
 }
 
+let refreshSequence = 0
+
 async function refresh(): Promise<void> {
+  const sequence = ++refreshSequence
   try {
     const resp = await fetch('/controller/v1/pools', { cache: 'no-store' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    render((await resp.json()) as PoolsResponse)
+    const data = (await resp.json()) as PoolsResponse
+    if (sequence !== refreshSequence) return
+    render(data)
     showBanner()
   } catch (e) {
+    if (sequence !== refreshSequence) return
     showBanner(`cluster state unavailable: ${e instanceof Error ? e.message : e}`)
   }
 }

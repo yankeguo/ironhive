@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log"
@@ -71,7 +72,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", strings.Join([]string{
 			"default-src 'none'",
 			"script-src 'self'",
-			"style-src 'self' 'unsafe-inline'",
+			"style-src 'self'",
 			"img-src 'self' data:",
 			"connect-src 'self'",
 			"form-action 'self'",
@@ -98,10 +99,22 @@ func (s *Server) handleAbout(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := webTmpl.ExecuteTemplate(w, name, data); err != nil {
+	body, err := renderTemplate(name, data)
+	if err != nil {
 		log.Println("template:", err)
+		writeError(w, http.StatusInternalServerError, "template rendering failed")
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func renderTemplate(name string, data any) ([]byte, error) {
+	var body bytes.Buffer
+	if err := webTmpl.ExecuteTemplate(&body, name, data); err != nil {
+		return nil, err
+	}
+	return body.Bytes(), nil
 }
 
 // handleAllocate hands one Ready standby pod of the requested pool to the
@@ -133,7 +146,8 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrNoSandboxAvailable):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		log.Println("allocate:", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{
 			"sandbox":      st.Name,
@@ -166,7 +180,8 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrSandboxNotFound), errors.Is(err, ErrSandboxNotAllocated):
 		writeError(w, http.StatusNotFound, err.Error())
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		log.Println("renew:", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{
 			"sandbox":      st.Name,
@@ -214,7 +229,8 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrSandboxNotFound), errors.Is(err, ErrSandboxNotAllocated):
 		writeError(w, http.StatusNotFound, err.Error())
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		log.Println("release:", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"released": name})
 	}
@@ -235,6 +251,7 @@ type podInfo struct {
 	Phase        string `json:"phase"`
 	Ready        bool   `json:"ready"`
 	IP           string `json:"ip,omitempty"`
+	Deleting     bool   `json:"deleting,omitempty"`
 	Allocated    bool   `json:"allocated"`
 	LeaseExpires string `json:"leaseExpires,omitempty"`
 	CreatedAt    string `json:"createdAt"`
@@ -262,6 +279,9 @@ func (s *Server) handlePools(w http.ResponseWriter, _ *http.Request) {
 			summaries[p.Pool] = sum
 		}
 		switch {
+		case p.Deleting:
+			// Terminating pods are visible in the table but are no longer
+			// usable standby or allocated capacity.
 		case p.Allocated:
 			sum.Allocated++
 		case p.Phase == corev1.PodRunning && p.Ready:
@@ -275,6 +295,7 @@ func (s *Server) handlePools(w http.ResponseWriter, _ *http.Request) {
 			Phase:     string(p.Phase),
 			Ready:     p.Ready,
 			IP:        p.IP,
+			Deleting:  p.Deleting,
 			Allocated: p.Allocated,
 			CreatedAt: p.CreatedAt.UTC().Format(time.RFC3339),
 		}
@@ -302,13 +323,14 @@ func (s *Server) handleAgentProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.Header.Get("X-Sandbox-ID")
 	st, ok := s.Pods.Lookup(name)
-	if !ok || !st.Allocated || st.IP == "" {
+	if !ok || st.Deleting || !st.Allocated || st.IP == "" {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
 	target, err := url.Parse(s.agentURL(st))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		log.Println("agent proxy target:", name, ":", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	proxy := &httputil.ReverseProxy{
@@ -317,7 +339,7 @@ func (s *Server) handleAgentProxy(w http.ResponseWriter, r *http.Request) {
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.Println("agent proxy:", name, ":", err)
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream agent unavailable")
 		},
 	}
 	proxy.ServeHTTP(w, r)

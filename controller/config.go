@@ -126,6 +126,9 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	if errs := validation.IsDNS1123Label(c.Kubernetes.Namespace); len(errs) > 0 {
+		return fmt.Errorf("kubernetes.namespace %q: %s", c.Kubernetes.Namespace, strings.Join(errs, "; "))
+	}
 	for name, p := range c.Pools {
 		// The pool name lands in the ironhive.dev/pool label of every pod,
 		// so it must be a valid label value — otherwise pod creation fails
