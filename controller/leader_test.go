@@ -2,12 +2,16 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 // shrinkLeaderTimings makes the election fast enough for tests.
@@ -29,6 +33,7 @@ func TestLeaderElectionReconciles(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	go m.Run(ctx)
 	go m.RunLeaderElection(ctx)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -75,6 +80,7 @@ func TestLeaderElectionYieldsToHolder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	go m.Run(ctx)
 	go m.RunLeaderElection(ctx)
 
 	// This replica is not the leader, so no reconcile may happen.
@@ -85,5 +91,62 @@ func TestLeaderElectionYieldsToHolder(t *testing.T) {
 	}
 	if len(pods.Items) != 0 {
 		t.Fatalf("non-leader reconciled: %d pods, want 0", len(pods.Items))
+	}
+}
+
+func TestLeaderWaitsForInitialList(t *testing.T) {
+	shrinkLeaderTimings(t)
+	cfg := testPoolConfig(1)
+	existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:            "sandbox-existing",
+		Namespace:       "ironhive",
+		ResourceVersion: "1",
+		Labels: map[string]string{
+			LabelManagedBy:    ManagedByValue,
+			LabelPool:         "default",
+			LabelTemplateHash: podTemplateHash(cfg.Pools["default"].PodTemplate),
+		},
+	}}
+	kube := fake.NewSimpleClientset(existing)
+	listStarted := make(chan struct{})
+	allowList := make(chan struct{})
+	var once sync.Once
+	kube.Fake.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		once.Do(func() { close(listStarted) })
+		<-allowList
+		return false, nil, nil
+	})
+	m := NewPodManager(kube, "ironhive", cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.Run(ctx)
+	<-listStarted
+	go m.RunLeaderElection(ctx)
+	time.Sleep(200 * time.Millisecond)
+	for _, action := range kube.Actions() {
+		if action.GetVerb() == "create" && action.GetResource().Resource == "pods" {
+			t.Fatal("leader created a pod before the initial list completed")
+		}
+	}
+	close(allowList)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+		if err == nil && lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica did not enter leader election after initial list")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("restart produced %d pods, want the existing one only", len(pods.Items))
 	}
 }

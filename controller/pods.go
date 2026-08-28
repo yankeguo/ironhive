@@ -68,6 +68,8 @@ type PodState struct {
 	IP        string
 	Phase     corev1.PodPhase
 	Ready     bool // the pod's Ready condition
+	// Deleting reports whether Kubernetes has accepted deletion of the pod.
+	Deleting bool
 	// Allocated reports whether the pod has been handed out to a client.
 	Allocated bool
 	// LeaseExpires is the deadline of the allocation's lease; zero when
@@ -92,14 +94,18 @@ type PodManager struct {
 
 	mu   sync.RWMutex
 	pods map[string]*PodState // key: pod name
+
+	initialList     chan struct{}
+	initialListOnce sync.Once
 }
 
 func NewPodManager(kube kubernetes.Interface, namespace string, cfg *Config) *PodManager {
 	return &PodManager{
-		kube:      kube,
-		namespace: namespace,
-		cfg:       cfg,
-		pods:      map[string]*PodState{},
+		kube:        kube,
+		namespace:   namespace,
+		cfg:         cfg,
+		pods:        map[string]*PodState{},
+		initialList: make(chan struct{}),
 	}
 }
 
@@ -178,7 +184,20 @@ func (m *PodManager) list(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	m.pods = fresh
 	m.mu.Unlock()
+	m.initialListOnce.Do(func() { close(m.initialList) })
 	return list.ResourceVersion, nil
+}
+
+// waitForInitialList keeps a replica out of leader election until its cache
+// has a trustworthy baseline. Reconciling an empty startup cache would
+// duplicate every existing standby pod.
+func (m *PodManager) waitForInitialList(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-m.initialList:
+		return true
+	}
 }
 
 // watch applies pod events to the in-memory state until the watch breaks
@@ -200,6 +219,9 @@ func (m *PodManager) watch(ctx context.Context, resourceVersion string) error {
 			if !ok {
 				return fmt.Errorf("watch channel closed")
 			}
+			if ev.Type == watch.Error {
+				return fmt.Errorf("watch pods: %w", apierrors.FromObject(ev.Object))
+			}
 			m.applyEvent(ev)
 		}
 	}
@@ -208,8 +230,6 @@ func (m *PodManager) watch(ctx context.Context, resourceVersion string) error {
 func (m *PodManager) applyEvent(ev watch.Event) {
 	pod, ok := ev.Object.(*corev1.Pod)
 	if !ok {
-		// Includes watch.Error events (e.g. 410 Gone) — logged by the
-		// caller restarting from a fresh list.
 		return
 	}
 	m.mu.Lock()
@@ -222,9 +242,23 @@ func (m *PodManager) applyEvent(ev watch.Event) {
 	}
 }
 
-// reconcile tops up each pool to its standby count and sweeps terminated
-// pods and expired leases so they do not pile up. Failures are logged and
-// retried on the next pass.
+type sweepTarget struct {
+	name            string
+	resourceVersion string
+	reason          string
+}
+
+func targetFor(p *PodState, reason string) sweepTarget {
+	return sweepTarget{name: p.Name, resourceVersion: p.ResourceVersion, reason: reason}
+}
+
+func readyStandby(p PodState) bool {
+	return p.Phase == corev1.PodRunning && p.Ready && p.IP != ""
+}
+
+// reconcile makes each pool converge on its exact standby count and sweeps
+// terminated pods, expired leases and stale templates. Failures are logged
+// and retried on the next pass.
 func (m *PodManager) reconcile(ctx context.Context) {
 	// Precompute the current template hash of every configured pool.
 	hashes := make(map[string]string, len(m.cfg.Pools))
@@ -233,49 +267,87 @@ func (m *PodManager) reconcile(ctx context.Context) {
 	}
 
 	m.mu.RLock()
-	active := make(map[string]int, len(m.cfg.Pools))
-	var terminated, expired, stale []string
+	standby := make(map[string][]PodState, len(m.cfg.Pools))
+	var sweeps []sweepTarget
 	now := time.Now()
 	for _, p := range m.pods {
 		// A freshly created pod has an empty phase until the API server
 		// fills it in; count anything not terminated as active — except
 		// allocated pods, which are in use and not standby capacity.
 		switch {
+		case p.Deleting:
+			// Kubernetes has accepted deletion already. Do not allocate,
+			// sweep again or count the pod toward desired standby.
 		case p.Phase == corev1.PodSucceeded || p.Phase == corev1.PodFailed:
-			terminated = append(terminated, p.Name)
+			sweeps = append(sweeps, targetFor(p, "terminated"))
 		case p.Allocated:
 			// A zero LeaseExpires is far in the past, so allocated pods
 			// without a (parseable) lease are reaped too — no dead leases.
 			if now.After(p.LeaseExpires) {
-				expired = append(expired, p.Name)
+				sweeps = append(sweeps, targetFor(p, "expired-lease"))
 			}
-		case p.TemplateHash != hashes[p.Pool]:
-			// The pool is gone from the config or its podTemplate
-			// changed since this pod was created — recycle the standby
-			// pod so the pool converges on the current template.
-			// Allocated pods are left alone: a client is using them and
-			// the lease expiry will reclaim them in time.
-			stale = append(stale, p.Name)
 		default:
-			active[p.Pool]++
+			hash, configured := hashes[p.Pool]
+			if !configured || p.TemplateHash != hash {
+				// The pool is gone from the config or its podTemplate
+				// changed since this pod was created — recycle the standby
+				// pod so the pool converges on the current template.
+				// Allocated pods are left alone: a client is using them and
+				// the lease expiry will reclaim them in time.
+				sweeps = append(sweeps, targetFor(p, "stale-template"))
+				continue
+			}
+			standby[p.Pool] = append(standby[p.Pool], *p)
 		}
 	}
 	m.mu.RUnlock()
 
-	for _, sweep := range []struct {
-		reason string
-		names  []string
-	}{
-		{"terminated", terminated},
-		{"expired-lease", expired},
-		{"stale-template", stale},
-	} {
-		for _, name := range sweep.names {
-			if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-				log.Println("pod manager: delete", sweep.reason, "pod", name, ":", err)
-			} else {
-				log.Println("pod manager: deleted", sweep.reason, "pod", name)
+	// A static count is a target, not a floor. Prefer deleting pods that
+	// cannot be allocated yet, then the newest names, preserving the
+	// maximum amount of already-warm capacity.
+	for name, pods := range standby {
+		desired := m.cfg.Pools[name].Standby.Static.Count
+		if desired < 0 {
+			desired = 0
+		}
+		surplus := len(pods) - desired
+		if surplus <= 0 {
+			continue
+		}
+		sort.Slice(pods, func(i, j int) bool {
+			iReady, jReady := readyStandby(pods[i]), readyStandby(pods[j])
+			if iReady != jReady {
+				return !iReady
 			}
+			return pods[i].Name > pods[j].Name
+		})
+		for _, p := range pods[:surplus] {
+			p := p
+			sweeps = append(sweeps, targetFor(&p, "surplus-standby"))
+		}
+	}
+	sort.Slice(sweeps, func(i, j int) bool {
+		if sweeps[i].reason != sweeps[j].reason {
+			return sweeps[i].reason < sweeps[j].reason
+		}
+		return sweeps[i].name < sweeps[j].name
+	})
+
+	for _, target := range sweeps {
+		opts := metav1.DeleteOptions{}
+		if target.resourceVersion != "" {
+			rv := target.resourceVersion
+			opts.Preconditions = &metav1.Preconditions{ResourceVersion: &rv}
+		}
+		err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, target.name, opts)
+		switch {
+		case err == nil:
+			m.forgetPod(target.name, target.resourceVersion)
+			log.Println("pod manager: deleted", target.reason, "pod", target.name)
+		case apierrors.IsNotFound(err):
+			m.forgetPod(target.name, "")
+		default:
+			log.Println("pod manager: delete", target.reason, "pod", target.name, ":", err)
 		}
 	}
 
@@ -287,12 +359,23 @@ func (m *PodManager) reconcile(ctx context.Context) {
 	sort.Strings(names)
 	for _, name := range names {
 		pool := m.cfg.Pools[name]
-		for i := active[name]; i < pool.Standby.Static.Count; i++ {
+		for i := len(standby[name]); i < pool.Standby.Static.Count; i++ {
 			if err := m.createPod(ctx, name, pool); err != nil {
 				log.Println("pod manager: create pod for pool", name, ":", err)
 				break
 			}
 		}
+	}
+}
+
+// forgetPod removes the classified cache entry after a successful API
+// deletion. A newer watch event is kept; it carries Deleting and is already
+// excluded from candidates and pool sizing.
+func (m *PodManager) forgetPod(name, resourceVersion string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.pods[name]; ok && (resourceVersion == "" || p.ResourceVersion == resourceVersion) {
+		delete(m.pods, name)
 	}
 }
 
@@ -314,6 +397,10 @@ func (m *PodManager) createPod(ctx context.Context, poolName string, pool PoolCo
 	pod.Labels[LabelManagedBy] = ManagedByValue
 	pod.Labels[LabelPool] = poolName
 	pod.Labels[LabelTemplateHash] = podTemplateHash(pool.PodTemplate)
+	// Allocation annotations are controller-owned state, never template
+	// defaults. Keeping either can create a phantom allocated sandbox.
+	delete(pod.Annotations, AnnotationAllocated)
+	delete(pod.Annotations, AnnotationLeaseExpires)
 
 	created, err := m.kube.CoreV1().Pods(m.namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
@@ -343,6 +430,7 @@ func podStateFrom(pod *corev1.Pod) *PodState {
 		IP:              pod.Status.PodIP,
 		Phase:           pod.Status.Phase,
 		Ready:           ready,
+		Deleting:        pod.DeletionTimestamp != nil,
 		Allocated:       pod.Annotations[AnnotationAllocated] != "",
 		LeaseExpires:    leaseExpires,
 		TemplateHash:    pod.Labels[LabelTemplateHash],
@@ -407,9 +495,11 @@ func (m *PodManager) Allocate(ctx context.Context, poolName string, lease, wait 
 
 // candidates lists the pool's claimable pods, sorted by name.
 func (m *PodManager) candidates(poolName string) []PodState {
+	wantHash := podTemplateHash(m.cfg.Pools[poolName].PodTemplate)
 	var out []PodState
 	for _, p := range m.Pods() {
-		if p.Pool == poolName && !p.Allocated && p.Phase == corev1.PodRunning && p.Ready && p.IP != "" {
+		if p.Pool == poolName && p.TemplateHash == wantHash && !p.Deleting && !p.Allocated &&
+			p.Phase == corev1.PodRunning && p.Ready && p.IP != "" {
 			out = append(out, p)
 		}
 	}
