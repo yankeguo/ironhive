@@ -1,8 +1,8 @@
 # ironhive
 
-A GitHub template that bundles multiple TypeScript entrypoints and Tailwind CSS with Bun, then serves the hashed assets through classic Go `html/template` and `net/http`.
+Warm pools of sandbox containers on Kubernetes. `ironhive-controller` keeps a configurable number of standby pods per pool, hands them out over HTTP, and reverse-proxies each pod's in-container API; `ironhive-agent` runs as PID 1 inside every sandbox pod and exposes file / tar / dir / shell endpoints.
 
-Retro on the server, modern in the build:
+The controller's web UI is retro on the server, modern in the build:
 
 - **std `net/http` only** — Go 1.22+ pattern routing (`GET /{$}`, `GET /static/`, `{id}` wildcards), security headers, graceful shutdown with no deadline. No web framework, no router dependency.
 - **Bun multi-entry build** — every `.ts` / `.css` file in `web/src/entries/` is bundled by `web/build.ts` (`Bun.build`, IIFE, minified) into `web/dist/<name>-<hash>.<ext>`. `main.css` is a full Tailwind v4 build (`bun-plugin-tailwind`) with build-time lucide icons via `@iconify/tailwind4`.
@@ -13,11 +13,12 @@ Retro on the server, modern in the build:
 
 | Path | Role |
 |---|---|
-| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`; `-kubeconfig` / `IHC_KUBECONFIG`; `-config` / `IHC_CONFIG`, default `config.yml`), graceful shutdown |
+| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`; `-kubeconfig` / `IHC_KUBECONFIG`; `-config` / `IHC_CONFIG`, default `config.yml`; `-namespace` / `IHC_NAMESPACE`), graceful shutdown |
 | `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers |
-| `controller/` | Controller package: HTTP server, views, static assets |
-| `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
-| `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback |
+| `controller/` | Controller package: HTTP server, pod manager, views, static assets |
+| `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers, allocate/release endpoints, `/agent/` reverse proxy |
+| `controller/pods.go` | Pod manager: standby reconcile, list+watch in-memory state, allocate/release with cross-replica claims |
+| `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback; namespace resolution |
 | `controller/config.go` | `config.yml` loading: `pools.<name>` with `standby.static.count` (default 10), `podTemplate` (`corev1.PodTemplateSpec`), `agent.port` (default 19173) |
 | `config.yml` | Example controller configuration with one `default` pool |
 | `deploy/rbac.yaml` | Example RBAC: ServiceAccount + Role (pods get/list/watch/create/update/patch/delete) in the `ironhive` namespace |
@@ -30,13 +31,34 @@ Retro on the server, modern in the build:
 
 ## ironhive-controller
 
-`ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. Flags: `-listen` / `IHC_LISTEN` (default `:8080`), `-kubeconfig` / `IHC_KUBECONFIG`, `-config` / `IHC_CONFIG` (default `config.yml`).
+`ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. Flags: `-listen` / `IHC_LISTEN` (default `:8080`), `-kubeconfig` / `IHC_KUBECONFIG`, `-config` / `IHC_CONFIG` (default `config.yml`), `-namespace` / `IHC_NAMESPACE` (namespace the managed pods live in; defaults to the in-cluster service-account namespace, else `default`).
 
 The config file declares container pools: `pools.<name>.standby.static.count` (warm pods kept ready, default 10), `pools.<name>.podTemplate` (a full Kubernetes pod template, parsed as `corev1.PodTemplateSpec`), and `pools.<name>.agent.port` (the agent's listen port inside the pod, default 19173). See the annotated `config.yml` in the repo root. An absent config file is tolerated while nothing consumes pools; a present-but-invalid one fails startup.
 
 Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
 
 For in-cluster operation, `deploy/rbac.yaml` is a ready-to-apply example scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete, and the `RoleBinding` between them. Set `serviceAccountName: ironhive-controller` on the controller's Deployment to pick it up.
+
+### Pod manager
+
+The pod manager (`controller/pods.go`) keeps each pool's standby pods warm and tracks every managed pod in memory:
+
+- Pods are named `sandbox-<lowercase ULID>` and carry two enforced labels — `app.kubernetes.io/managed-by=ironhive-controller` (also the list/watch selector) and `ironhive.dev/pool=<pool name>` — merged over any template labels.
+- A list+watch loop maintains an in-memory map of pod states (phase, Ready condition, IP, allocation). A broken watch is re-established from a fresh list with backoff; a periodic reconcile is the safety net against missed events.
+- Reconcile tops each pool up to `standby.static.count` (allocated pods don't count — they are in use, not standby) and sweeps `Succeeded` / `Failed` pods.
+- **Allocation state lives on the pod object** as the `ironhive.dev/allocated` annotation. Claiming is a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition, so racing controller replicas cannot claim the same pod — the API server accepts exactly one. No leader election; state survives controller restarts and is shared by all replicas through the watch.
+- Sandboxes are **single-use**: releasing destroys the pod and reconcile tops the pool up with a fresh one.
+
+### API
+
+| Endpoint | Description |
+|---|---|
+| `GET /healthz` | Liveness probe, returns `{"message":"OK"}` |
+| `POST /controller/v1/allocate?pool=` | Claim one Ready standby pod of the pool; blocks up to 30 s waiting for one to become available. Returns `{"sandbox":"<pod name>"}`; `400` for a missing/unknown pool, `503` when none became available in time |
+| `POST /controller/v1/release?sandbox=` | Destroy an allocated pod; the pool is topped up with a fresh standby pod asynchronously. Returns `{"released":"<pod name>"}`; `404` for an unknown or unallocated sandbox |
+| `ANY /agent/**` | Reverse-proxy to the agent inside the pod named by the `X-Sandbox-ID` request header (`http://<podIP>:<agentPort>`); the path is preserved — the agent serves its own API under `/agent/v1/...`. `404` when the sandbox is unknown, unallocated, or has no IP yet; `502` when the agent cannot be reached |
+
+Parameter passing and response conventions follow the agent's: **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts); non-data responses (successes and errors alike) use the JSON envelope `{"message": ...}`.
 
 ## ironhive-agent
 
