@@ -31,6 +31,7 @@ func main() {
 	mux.HandleFunc("POST /v1/file/upload", agent.FilesUploadHandler())
 	mux.HandleFunc("GET /v1/tar", agent.TarGetHandler())
 	mux.HandleFunc("PUT /v1/tar", agent.TarPutHandler())
+	mux.HandleFunc("POST /v1/tar/upload", agent.TarUploadHandler())
 	mux.HandleFunc("GET /v1/dir", agent.DirGetHandler())
 	mux.HandleFunc("PUT /v1/dir", agent.DirPutHandler())
 	mux.HandleFunc("POST /v1/shell", agent.ShellPostHandler())

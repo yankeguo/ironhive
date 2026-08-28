@@ -3,6 +3,7 @@ package agent
 import (
 	"archive/tar"
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -356,6 +357,93 @@ func TestTarPutFilter(t *testing.T) {
 	// A bad pattern is a 400.
 	if rec := putTarQuery(t, dest, "&exclude="+url.QueryEscape("[bad"), body()); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad pattern: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestTarUpload(t *testing.T) {
+	src := t.TempDir()
+	writeTestTree(t, src)
+
+	var gotMethod, gotCT, gotAuth string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotCT = r.Header.Get("Content-Type")
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+	}))
+	defer srv.Close()
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/v1/tar/upload?path="+url.QueryEscape(src)+
+			"&url="+url.QueryEscape(srv.URL)+
+			"&method=put&headers="+url.QueryEscape("Authorization=Bearer t0ken")+
+			"&exclude="+url.QueryEscape("**/*.log"), nil)
+	rec := httptest.NewRecorder()
+	TarUploadHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %q, want PUT", gotMethod)
+	}
+	if gotCT != "application/x-tar" {
+		t.Fatalf("Content-Type = %q", gotCT)
+	}
+	if gotAuth != "Bearer t0ken" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+	// The uploaded body is a valid tar holding the filtered entries.
+	var names []string
+	tr := tar.NewReader(bytes.NewReader(gotBody))
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		names = append(names, hdr.Name)
+	}
+	want := []string{"sub/", "sub/deep/", "sub/deep/d.txt", "sub/nested.txt", "top.txt"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("entries = %v, want %v", names, want)
+	}
+}
+
+func TestTarUploadErrors(t *testing.T) {
+	src := t.TempDir()
+	upload := func(target, extra string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost,
+			"/v1/tar/upload?path="+url.QueryEscape(target)+extra, nil)
+		rec := httptest.NewRecorder()
+		TarUploadHandler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := upload(src, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing url: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(src, "&url="+url.QueryEscape("http://example.com")+"&method=get"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bodiless method: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(src, "&url="+url.QueryEscape("http://example.com")+"&include="+url.QueryEscape("[bad")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad pattern: status = %d, want 400", rec.Code)
+	}
+	if rec := upload(filepath.Join(t.TempDir(), "nope"), "&url="+url.QueryEscape("http://example.com")); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing dir: status = %d, want 404", rec.Code)
+	}
+	f := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rec := upload(f, "&url="+url.QueryEscape("http://example.com")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("not a directory: status = %d, want 400", rec.Code)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "broken", http.StatusConflict)
+	}))
+	defer srv.Close()
+	if rec := upload(src, "&url="+url.QueryEscape(srv.URL)); rec.Code != http.StatusBadGateway {
+		t.Fatalf("upstream 409: status = %d, want 502", rec.Code)
 	}
 }
 

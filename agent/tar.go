@@ -228,6 +228,60 @@ func writeDirToTar(tw *tar.Writer, root string, filter *tarFilter) error {
 	})
 }
 
+// TarUploadHandler serves POST /v1/tar/upload?path=<dir>&url=<url>: the
+// directory at path is packed as an uncompressed tar stream — the same
+// archive GET /v1/tar produces, honoring the same repeatable include and
+// exclude filters — and streamed as the request body to url with
+// Content-Type application/x-tar. method and headers behave as in
+// POST /v1/file/upload. The stream length is unknown upfront, so the
+// upload uses chunked encoding. A non-2xx upstream response is reported
+// as 502.
+func TarUploadHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		method, rawURL, hdrs, ok := parseUploadOptions(w, q)
+		if !ok {
+			return
+		}
+		filter, err := newTarFilter(q)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		p, unlock, ok := requirePath(w, r)
+		if !ok {
+			return
+		}
+		defer unlock()
+		st, err := os.Stat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "not found: "+p, http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		if !st.IsDir() {
+			http.Error(w, "not a directory: "+p, http.StatusBadRequest)
+			return
+		}
+		// Pack and upload concurrently: the goroutine writes the archive
+		// into the pipe while the HTTP client reads it as the request body.
+		pr, pw := io.Pipe()
+		go func() {
+			tw := tar.NewWriter(pw)
+			err := writeDirToTar(tw, p, filter)
+			if cerr := tw.Close(); err == nil {
+				err = cerr
+			}
+			_ = pw.CloseWithError(err)
+		}()
+		uploadStream(w, r, method, rawURL, hdrs, "application/x-tar", pr, -1)
+		pr.Close()
+	}
+}
+
 // errBadTar marks errors caused by the archive itself (corrupt stream,
 // malicious entry names, unsupported entry types) as opposed to local
 // filesystem failures, so the handler can answer 400 instead of 500.

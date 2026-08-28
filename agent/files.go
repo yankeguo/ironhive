@@ -238,6 +238,80 @@ func putSource(w http.ResponseWriter, r *http.Request, rawURL string) (src io.Re
 	return resp.Body, true
 }
 
+// parseUploadOptions validates the url, method and headers query
+// parameters shared by the upload endpoints. On failure it writes the
+// error response and returns ok == false.
+func parseUploadOptions(w http.ResponseWriter, q url.Values) (method, rawURL string, hdrs [][2]string, ok bool) {
+	rawURL = q.Get("url")
+	if rawURL == "" {
+		http.Error(w, "missing query parameter: url", http.StatusBadRequest)
+		return "", "", nil, false
+	}
+	if err := validatePutURL(rawURL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", "", nil, false
+	}
+	method = strings.ToUpper(q.Get("method"))
+	if method == "" {
+		method = http.MethodPost
+	}
+	switch method {
+	case http.MethodPut, http.MethodPost, http.MethodPatch:
+	default:
+		http.Error(w, "invalid method: must be PUT, POST or PATCH", http.StatusBadRequest)
+		return "", "", nil, false
+	}
+	for _, h := range q["headers"] {
+		k, v, found := strings.Cut(h, "=")
+		if !found || k == "" {
+			http.Error(w, fmt.Sprintf("invalid headers entry %q: must be key=value", h), http.StatusBadRequest)
+			return "", "", nil, false
+		}
+		hdrs = append(hdrs, [2]string{k, v})
+	}
+	return method, rawURL, hdrs, true
+}
+
+// uploadStream streams body to rawURL with method and the given extra
+// headers, writing "OK" on a 2xx upstream response and a 502 otherwise.
+// size is the body length, or negative when unknown (chunked encoding).
+// contentType is sent as the Content-Type header when non-empty.
+func uploadStream(w http.ResponseWriter, r *http.Request, method, rawURL string, hdrs [][2]string, contentType string, body io.Reader, size int64) bool {
+	req, err := http.NewRequestWithContext(r.Context(), method, rawURL, body)
+	if err != nil {
+		http.Error(w, "upload: "+err.Error(), http.StatusInternalServerError)
+		return false
+	}
+	if size >= 0 {
+		req.ContentLength = size
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for _, h := range hdrs {
+		req.Header.Add(h[0], h[1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "upload: "+err.Error(), http.StatusBadGateway)
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// Include a bounded slice of the upstream body for debugging.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := "upload: upstream " + resp.Status
+		if s := strings.TrimSpace(string(snippet)); s != "" {
+			msg += ": " + s
+		}
+		http.Error(w, msg, http.StatusBadGateway)
+		return false
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("OK"))
+	return true
+}
+
 // FilesUploadHandler serves POST /v1/file/upload?path=<file>&url=<url>:
 // the local file at path is streamed as the request body to url, using the
 // method given by the method query parameter (default POST; only PUT, POST
@@ -248,33 +322,9 @@ func FilesUploadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		// Validate options before touching the filesystem.
-		rawURL := q.Get("url")
-		if rawURL == "" {
-			http.Error(w, "missing query parameter: url", http.StatusBadRequest)
+		method, rawURL, hdrs, ok := parseUploadOptions(w, q)
+		if !ok {
 			return
-		}
-		if err := validatePutURL(rawURL); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		method := strings.ToUpper(q.Get("method"))
-		if method == "" {
-			method = http.MethodPost
-		}
-		switch method {
-		case http.MethodPut, http.MethodPost, http.MethodPatch:
-		default:
-			http.Error(w, "invalid method: must be PUT, POST or PATCH", http.StatusBadRequest)
-			return
-		}
-		var hdrs [][2]string
-		for _, h := range q["headers"] {
-			k, v, found := strings.Cut(h, "=")
-			if !found || k == "" {
-				http.Error(w, fmt.Sprintf("invalid headers entry %q: must be key=value", h), http.StatusBadRequest)
-				return
-			}
-			hdrs = append(hdrs, [2]string{k, v})
 		}
 		p, unlock, ok := requirePath(w, r)
 		if !ok {
@@ -300,33 +350,7 @@ func FilesUploadHandler() http.HandlerFunc {
 			http.Error(w, "is a directory: "+p, http.StatusBadRequest)
 			return
 		}
-		req, err := http.NewRequestWithContext(r.Context(), method, rawURL, f)
-		if err != nil {
-			http.Error(w, "upload: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.ContentLength = st.Size()
-		for _, h := range hdrs {
-			req.Header.Add(h[0], h[1])
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			http.Error(w, "upload: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			// Include a bounded slice of the upstream body for debugging.
-			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			msg := "upload: upstream " + resp.Status
-			if s := strings.TrimSpace(string(snippet)); s != "" {
-				msg += ": " + s
-			}
-			http.Error(w, msg, http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("OK"))
+		uploadStream(w, r, method, rawURL, hdrs, "", f, st.Size())
 	}
 }
 
