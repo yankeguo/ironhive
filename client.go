@@ -5,13 +5,13 @@
 //	c := ironhive.NewClient("http://ironhive-controller:8080")
 //	sb, err := c.Allocate(ctx, "default", 5*time.Minute)
 //	if err != nil { ... }
-//	defer sb.Release(ctx)
+//	defer sb.Release(context.Background())
 //	err = sb.Shell(ctx, "echo hello", nil, func(ev ironhive.ShellEvent) error {
 //		fmt.Println(ev.Type, ev.Data)
 //		return nil
 //	})
 //
-// Requests carry no server-side timeout, matching the controller/agent
+// Requests carry no client-side timeout, matching the controller/agent
 // philosophy: deadlines and cancellation belong to the caller's context.
 package ironhive
 
@@ -103,8 +103,8 @@ type PoolsState struct {
 // available; pass a deadline in ctx to bound the total wait. The returned
 // Sandbox is the handle for renew, release and all agent calls.
 func (c *Client) Allocate(ctx context.Context, pool string, lease time.Duration) (*Sandbox, error) {
-	q := url.Values{"pool": {pool}, "lease": {lease.String()}}
-	resp, err := c.do(ctx, http.MethodPost, "/controller/v1/allocate", q, nil, nil)
+	form := url.Values{"pool": {pool}, "lease": {lease.String()}}
+	resp, err := c.doPostForm(ctx, "/controller/v1/allocate", form, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -122,8 +122,8 @@ func (c *Client) Allocate(ctx context.Context, pool string, lease time.Duration)
 // Renew extends the lease of the named sandbox to lease from now and
 // returns the new deadline.
 func (c *Client) Renew(ctx context.Context, name string, lease time.Duration) (time.Time, error) {
-	q := url.Values{"sandbox": {name}, "lease": {lease.String()}}
-	resp, err := c.do(ctx, http.MethodPost, "/controller/v1/renew", q, nil, nil)
+	form := url.Values{"sandbox": {name}, "lease": {lease.String()}}
+	resp, err := c.doPostForm(ctx, "/controller/v1/renew", form, nil)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -140,8 +140,8 @@ func (c *Client) Renew(ctx context.Context, name string, lease time.Duration) (t
 // Release destroys the named sandbox; the pool is topped up with a fresh
 // one asynchronously.
 func (c *Client) Release(ctx context.Context, name string) error {
-	q := url.Values{"sandbox": {name}}
-	resp, err := c.do(ctx, http.MethodPost, "/controller/v1/release", q, nil, nil)
+	form := url.Values{"sandbox": {name}}
+	resp, err := c.doPostForm(ctx, "/controller/v1/release", form, nil)
 	if err != nil {
 		return err
 	}
@@ -166,6 +166,9 @@ func (c *Client) Pools(ctx context.Context) (*PoolsState, error) {
 // do issues one request and turns non-2xx responses into *Error. The
 // response body is open on success; the caller must close it.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body io.Reader, header http.Header) (*http.Response, error) {
+	if c == nil || c.http == nil {
+		return nil, fmt.Errorf("ironhive: invalid client")
+	}
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -175,20 +178,31 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return nil, err
 	}
 	for k, vs := range header {
-		req.Header[k] = vs
+		req.Header[k] = append([]string(nil), vs...)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		return nil, decodeError(resp)
 	}
 	return resp, nil
 }
 
-// decodeError reads the {"message": ...} envelope off an error response.
+// doPostForm sends an internal POST request with its parameters in the
+// urlencoded body. AgentDo deliberately remains query-preserving.
+func (c *Client) doPostForm(ctx context.Context, path string, form url.Values, header http.Header) (*http.Response, error) {
+	header = header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+	header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return c.do(ctx, http.MethodPost, path, nil, strings.NewReader(form.Encode()), header)
+}
+
+// decodeError reads the {"message": ...} envelope off a non-2xx response.
 func decodeError(resp *http.Response) error {
 	e := &Error{StatusCode: resp.StatusCode, Message: http.StatusText(resp.StatusCode)}
 	var body struct {
