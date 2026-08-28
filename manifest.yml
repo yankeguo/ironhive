@@ -122,7 +122,10 @@ spec:
       containers:
         - name: controller
           image: ghcr.io/yankeguo/ironhive:controller-latest
-          args: ["-config", "/etc/ironhive/config.yml"]
+          # The image's ENTRYPOINT is tini; keep it by leaving command
+          # unset and putting the controller binary first in args (K8s
+          # args append after the entrypoint).
+          args: ["/ironhive-controller", "-config", "/etc/ironhive/config.yml"]
           ports:
             - name: http
               containerPort: 8080
