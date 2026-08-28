@@ -103,6 +103,20 @@ func TestTarPutOverwrite(t *testing.T) {
 	}
 }
 
+func TestTarPutCreatesDestination(t *testing.T) {
+	// The target directory (and its parents) are created automatically.
+	dest := filepath.Join(t.TempDir(), "x", "y", "z")
+	rec := putTar(t, dest, buildTar(t, []tarEntry{
+		{name: "f.txt", typ: tar.TypeReg, mode: 0o644, body: "deep"},
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dest, "f.txt")); string(data) != "deep" {
+		t.Fatalf("content = %q", data)
+	}
+}
+
 func TestTarPutErrors(t *testing.T) {
 	if rec := putTar(t, "", &bytes.Buffer{}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing path: status = %d, want 400", rec.Code)
