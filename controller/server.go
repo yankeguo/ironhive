@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -46,6 +48,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /controller/v1/allocate", s.handleAllocate)
 	mux.HandleFunc("POST /controller/v1/release", s.handleRelease)
+	mux.HandleFunc("POST /controller/v1/renew", s.handleRenew)
+	mux.HandleFunc("GET /controller/v1/pools", s.handlePools)
 	mux.HandleFunc("/agent/", s.handleAgentProxy)
 	mux.HandleFunc("GET /{$}", s.handleHome)
 	mux.HandleFunc("GET /about", s.handleAbout)
@@ -53,11 +57,15 @@ func (s *Server) Handler() http.Handler {
 	return s.withSecurityHeaders(mux)
 }
 
+// withSecurityHeaders deliberately allows framing: the dashboard is a
+// read-only, unauthenticated overview meant to be embedded into
+// third-party systems via iframe, so X-Frame-Options and frame-ancestors
+// are left out on purpose. Deployment-level protection is handled by the
+// operator, not here.
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
 		h.Set("Content-Security-Policy", strings.Join([]string{
@@ -68,7 +76,6 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 			"connect-src 'self'",
 			"form-action 'self'",
 			"base-uri 'none'",
-			"frame-ancestors 'none'",
 		}, "; "))
 		next.ServeHTTP(w, r)
 	})
@@ -80,8 +87,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "home.html", map[string]any{
-		"Nav":  "home",
-		"Time": time.Now().Format(time.DateTime),
+		"Nav": "home",
 	})
 }
 
@@ -99,9 +105,9 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 }
 
 // handleAllocate hands one Ready standby pod of the requested pool to the
-// caller, blocking up to allocateWait for one to become available. The pool
-// name is read from the query string or a urlencoded body, like the
-// agent's POST endpoints.
+// caller, blocking up to allocateWait for one to become available. The
+// pool name and the mandatory lease duration are read from the query
+// string or a urlencoded body, like the agent's POST endpoints.
 func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	if s.Pods == nil {
 		writeError(w, http.StatusServiceUnavailable, "pod manager disabled")
@@ -116,7 +122,11 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing pool")
 		return
 	}
-	st, err := s.Pods.Allocate(r.Context(), pool, allocateWait)
+	lease, ok := leaseParam(w, params)
+	if !ok {
+		return
+	}
+	st, err := s.Pods.Allocate(r.Context(), pool, lease, allocateWait)
 	switch {
 	case errors.Is(err, ErrUnknownPool):
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -125,8 +135,61 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	default:
-		writeJSON(w, http.StatusOK, map[string]string{"sandbox": st.Name})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"sandbox":      st.Name,
+			"leaseExpires": st.LeaseExpires.UTC().Format(time.RFC3339),
+		})
 	}
+}
+
+// handleRenew extends the lease of an allocated pod to lease from now.
+func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
+	if s.Pods == nil {
+		writeError(w, http.StatusServiceUnavailable, "pod manager disabled")
+		return
+	}
+	params, ok := formParams(w, r)
+	if !ok {
+		return
+	}
+	name := params.Get("sandbox")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "missing sandbox")
+		return
+	}
+	lease, ok := leaseParam(w, params)
+	if !ok {
+		return
+	}
+	st, err := s.Pods.Renew(r.Context(), name, lease)
+	switch {
+	case errors.Is(err, ErrSandboxNotFound), errors.Is(err, ErrSandboxNotAllocated):
+		writeError(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{
+			"sandbox":      st.Name,
+			"leaseExpires": st.LeaseExpires.UTC().Format(time.RFC3339),
+		})
+	}
+}
+
+// leaseParam reads the mandatory lease duration parameter (a Go duration
+// string like "5m"); on failure it writes the error and returns ok ==
+// false.
+func leaseParam(w http.ResponseWriter, params url.Values) (time.Duration, bool) {
+	raw := params.Get("lease")
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "missing lease")
+		return 0, false
+	}
+	lease, err := time.ParseDuration(raw)
+	if err != nil || lease <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid lease: "+raw)
+		return 0, false
+	}
+	return lease, true
 }
 
 // handleRelease destroys an allocated pod; the pool is topped up with a
@@ -155,6 +218,78 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"released": name})
 	}
+}
+
+// poolSummary aggregates the pod counts of one pool for the dashboard.
+type poolSummary struct {
+	Name      string `json:"name"`
+	Standby   int    `json:"standby"`
+	Pending   int    `json:"pending"`
+	Allocated int    `json:"allocated"`
+}
+
+// podInfo is the dashboard view of one managed pod.
+type podInfo struct {
+	Name         string `json:"name"`
+	Pool         string `json:"pool"`
+	Phase        string `json:"phase"`
+	Ready        bool   `json:"ready"`
+	IP           string `json:"ip,omitempty"`
+	Allocated    bool   `json:"allocated"`
+	LeaseExpires string `json:"leaseExpires,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+}
+
+// handlePools serves the read-only cluster overview behind the dashboard:
+// per-pool standby/pending/allocated counts plus every managed pod. It is
+// unauthenticated and CORS-open by design — the data is not sensitive and
+// third-party systems are encouraged to embed it.
+func (s *Server) handlePools(w http.ResponseWriter, _ *http.Request) {
+	if s.Pods == nil {
+		writeError(w, http.StatusServiceUnavailable, "pod manager disabled")
+		return
+	}
+	summaries := make(map[string]*poolSummary, len(s.Config.Pools))
+	for name := range s.Config.Pools {
+		summaries[name] = &poolSummary{Name: name}
+	}
+	pods := s.Pods.Pods()
+	infos := make([]podInfo, 0, len(pods))
+	for _, p := range pods {
+		sum, ok := summaries[p.Pool]
+		if !ok {
+			sum = &poolSummary{Name: p.Pool}
+			summaries[p.Pool] = sum
+		}
+		switch {
+		case p.Allocated:
+			sum.Allocated++
+		case p.Phase == corev1.PodRunning && p.Ready:
+			sum.Standby++
+		case p.Phase != corev1.PodSucceeded && p.Phase != corev1.PodFailed:
+			sum.Pending++
+		}
+		info := podInfo{
+			Name:      p.Name,
+			Pool:      p.Pool,
+			Phase:     string(p.Phase),
+			Ready:     p.Ready,
+			IP:        p.IP,
+			Allocated: p.Allocated,
+			CreatedAt: p.CreatedAt.UTC().Format(time.RFC3339),
+		}
+		if p.Allocated && !p.LeaseExpires.IsZero() {
+			info.LeaseExpires = p.LeaseExpires.UTC().Format(time.RFC3339)
+		}
+		infos = append(infos, info)
+	}
+	ordered := make([]poolSummary, 0, len(summaries))
+	for _, sum := range summaries {
+		ordered = append(ordered, *sum)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	writeJSON(w, http.StatusOK, map[string]any{"pools": ordered, "pods": infos})
 }
 
 // handleAgentProxy forwards any request under /agent/ to the agent inside

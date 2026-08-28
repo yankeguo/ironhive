@@ -35,9 +35,10 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 ### Kubernetes state model (controller)
 
 - Managed pods are named `sandbox-<lowercase ULID>` and carry enforced labels `app.kubernetes.io/managed-by=ironhive-controller` (list/watch selector) and `ironhive.dev/pool=<pool>`.
-- **The pod object is the source of truth.** Allocation is the `ironhive.dev/allocated` annotation, claimed with a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition — that is the entire multi-replica coordination mechanism. Do not add leader election, locks, or a database.
+- **The pod object is the source of truth.** Allocation is the `ironhive.dev/allocated` annotation, claimed with a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition — that is the entire multi-replica coordination mechanism. Leases live there too: `ironhive.dev/lease-expires` (RFC3339), set at allocate time, extended by `POST /controller/v1/renew`, reaped by reconcile. Do not add leader election, locks, or a database.
 - In-memory state (`PodManager.pods`) is a watch-fed cache for fast reads; it must always be able to reconverge from a fresh list.
-- Sandboxes are single-use: release means delete the pod; reconcile tops the pool up. Do not return used pods to the standby pool.
+- Sandboxes are single-use: release or lease expiry means delete the pod; reconcile tops the pool up. Do not return used pods to the standby pool.
+- The dashboard and `GET /controller/v1/pools` are read-only, unauthenticated, and frameable on purpose (no `X-Frame-Options`, no CSP `frame-ancestors`) — embedding into third-party systems is a feature; access control is layered in front at deployment time.
 - Everything is best-effort with log-and-retry: failed creates/deletes are retried on the next reconcile pass; missing config or missing cluster disables the pod manager but never the web UI.
 
 ### Go style

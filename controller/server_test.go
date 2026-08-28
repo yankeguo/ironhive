@@ -36,19 +36,23 @@ func postForm(t *testing.T, rawURL string, form url.Values) *http.Response {
 
 func allocateViaHTTP(t *testing.T, base string) string {
 	t.Helper()
-	resp := postForm(t, base+"/controller/v1/allocate", url.Values{"pool": {"default"}})
+	resp := postForm(t, base+"/controller/v1/allocate", url.Values{"pool": {"default"}, "lease": {"10m"}})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("allocate: status %d", resp.StatusCode)
 	}
 	var out struct {
-		Sandbox string `json:"sandbox"`
+		Sandbox      string `json:"sandbox"`
+		LeaseExpires string `json:"leaseExpires"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
 	if out.Sandbox == "" {
 		t.Fatal("allocate: empty sandbox name")
+	}
+	if out.LeaseExpires == "" {
+		t.Fatal("allocate: empty leaseExpires")
 	}
 	return out.Sandbox
 }
@@ -59,7 +63,14 @@ func TestAllocateReleaseEndpoints(t *testing.T) {
 
 	name := allocateViaHTTP(t, srv.URL)
 
-	resp := postForm(t, srv.URL+"/controller/v1/release", url.Values{"sandbox": {name}})
+	// Renewing extends the lease.
+	resp := postForm(t, srv.URL+"/controller/v1/renew", url.Values{"sandbox": {name}, "lease": {"1h"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("renew: status %d", resp.StatusCode)
+	}
+
+	resp = postForm(t, srv.URL+"/controller/v1/release", url.Values{"sandbox": {name}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("release: status %d", resp.StatusCode)
@@ -72,18 +83,42 @@ func TestAllocateReleaseEndpoints(t *testing.T) {
 		t.Fatalf("re-release: status %d, want 404", resp.StatusCode)
 	}
 
+	// Renewing an unknown sandbox is a 404.
+	resp = postForm(t, srv.URL+"/controller/v1/renew", url.Values{"sandbox": {name}, "lease": {"1h"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("renew released sandbox: status %d, want 404", resp.StatusCode)
+	}
+
 	// Parameters may also ride in the query string.
-	resp = postForm(t, srv.URL+"/controller/v1/allocate?pool=nope", nil)
+	resp = postForm(t, srv.URL+"/controller/v1/allocate?pool=nope&lease=5m", nil)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("allocate unknown pool via query: status %d, want 400", resp.StatusCode)
 	}
 
 	// A missing pool parameter is a 400.
-	resp = postForm(t, srv.URL+"/controller/v1/allocate", nil)
+	resp = postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"lease": {"5m"}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("allocate without pool: status %d, want 400", resp.StatusCode)
+	}
+
+	// The lease is mandatory and must be a positive duration.
+	resp = postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"pool": {"default"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("allocate without lease: status %d, want 400", resp.StatusCode)
+	}
+	resp = postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"pool": {"default"}, "lease": {"banana"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("allocate with invalid lease: status %d, want 400", resp.StatusCode)
+	}
+	resp = postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"pool": {"default"}, "lease": {"-5m"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("allocate with negative lease: status %d, want 400", resp.StatusCode)
 	}
 }
 
@@ -91,7 +126,7 @@ func TestEndpointsWithoutPodManager(t *testing.T) {
 	srv := httptest.NewServer(NewServer(nil, testPoolConfig(1), nil).Handler())
 	defer srv.Close()
 
-	resp := postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"pool": {"default"}})
+	resp := postForm(t, srv.URL+"/controller/v1/allocate", url.Values{"pool": {"default"}, "lease": {"5m"}})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("allocate: status %d, want 503", resp.StatusCode)
@@ -103,13 +138,73 @@ func TestEndpointsWithoutPodManager(t *testing.T) {
 		t.Fatalf("release: status %d, want 503", resp.StatusCode)
 	}
 
-	resp, err := http.Get(srv.URL + "/agent/v1/file")
+	resp = postForm(t, srv.URL+"/controller/v1/renew", url.Values{"sandbox": {"sandbox-x"}, "lease": {"5m"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("renew: status %d, want 503", resp.StatusCode)
+	}
+
+	resp, err := http.Get(srv.URL + "/controller/v1/pools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("pools: status %d, want 503", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL + "/agent/v1/file")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("agent proxy: status %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestPoolsEndpoint(t *testing.T) {
+	srv := httptest.NewServer(testServerWithPods(t).Handler())
+	defer srv.Close()
+
+	name := allocateViaHTTP(t, srv.URL)
+
+	resp, err := http.Get(srv.URL + "/controller/v1/pools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pools: status %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("pools: ACAO = %q, want *", resp.Header.Get("Access-Control-Allow-Origin"))
+	}
+	var out struct {
+		Pools []struct {
+			Name      string `json:"name"`
+			Standby   int    `json:"standby"`
+			Pending   int    `json:"pending"`
+			Allocated int    `json:"allocated"`
+		} `json:"pools"`
+		Pods []struct {
+			Name      string `json:"name"`
+			Pool      string `json:"pool"`
+			Allocated bool   `json:"allocated"`
+		} `json:"pods"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Pools) != 1 || out.Pools[0].Name != "default" {
+		t.Fatalf("pools = %+v", out.Pools)
+	}
+	// The single pod was allocated: 0 standby, 1 allocated.
+	if out.Pools[0].Standby != 0 || out.Pools[0].Allocated != 1 {
+		t.Fatalf("pool summary = %+v", out.Pools[0])
+	}
+	if len(out.Pods) != 1 || out.Pods[0].Name != name || !out.Pods[0].Allocated {
+		t.Fatalf("pods = %+v", out.Pods)
 	}
 }
 

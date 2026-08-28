@@ -9,18 +9,29 @@
 </head>
 <body>
   {{template "nav" .}}
-  <main class="mx-auto max-w-screen-xl px-4 py-6">
-    <div class="card">
-      <div class="card-header">Home</div>
-      <div class="card-body">
-        <p>Served by std <code>net/http</code>, rendered with <code>html/template</code> at {{.Time}}.</p>
-        <p class="mt-4">
-          <button id="counter" type="button" class="btn btn-primary">
-            <span class="icon-[lucide--mouse-pointer-click]"></span> Clicked <span id="count">0</span> times
-          </button>
-        </p>
+  <main class="mx-auto max-w-screen-xl px-4 py-6 space-y-6">
+    <div id="banner" class="hidden rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-red-300"></div>
+    <section id="pools" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></section>
+    <section class="card">
+      <div class="card-header">Pods</div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-neutral-700 text-left text-neutral-400">
+              <th class="px-4 py-2 font-medium">Name</th>
+              <th class="px-4 py-2 font-medium">Pool</th>
+              <th class="px-4 py-2 font-medium">Phase</th>
+              <th class="px-4 py-2 font-medium">Ready</th>
+              <th class="px-4 py-2 font-medium">IP</th>
+              <th class="px-4 py-2 font-medium">Status</th>
+              <th class="px-4 py-2 font-medium">Lease</th>
+              <th class="px-4 py-2 font-medium">Age</th>
+            </tr>
+          </thead>
+          <tbody id="pods"></tbody>
+        </table>
       </div>
-    </div>
+    </section>
   </main>
 </body>
 </html>

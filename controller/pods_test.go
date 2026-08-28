@@ -192,7 +192,7 @@ func TestAllocateClaimsDistinctPods(t *testing.T) {
 	m.reconcile(ctx)
 	markReady(m)
 
-	first, err := m.Allocate(ctx, "default", time.Second)
+	first, err := m.Allocate(ctx, "default", time.Minute, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestAllocateClaimsDistinctPods(t *testing.T) {
 		t.Error("first pod not marked allocated")
 	}
 
-	second, err := m.Allocate(ctx, "default", time.Second)
+	second, err := m.Allocate(ctx, "default", time.Minute, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestAllocateClaimsDistinctPods(t *testing.T) {
 		t.Error("allocated the same pod twice")
 	}
 
-	// The allocation fact landed on the API object.
+	// The allocation fact landed on the API object, lease included.
 	pod, err := kube.CoreV1().Pods("ironhive").Get(ctx, first.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -216,16 +216,26 @@ func TestAllocateClaimsDistinctPods(t *testing.T) {
 	if pod.Annotations[AnnotationAllocated] == "" {
 		t.Error("allocated annotation missing on the pod object")
 	}
+	expires, err := time.Parse(time.RFC3339, pod.Annotations[AnnotationLeaseExpires])
+	if err != nil {
+		t.Fatal("lease-expires annotation missing or unparseable:", err)
+	}
+	if until := time.Until(expires); until < 30*time.Second || until > time.Minute {
+		t.Errorf("lease expires in %v, want ~1m", until)
+	}
+	if first.LeaseExpires.IsZero() {
+		t.Error("in-memory state has no lease deadline")
+	}
 
 	// The pool is exhausted now.
-	if _, err := m.Allocate(ctx, "default", 50*time.Millisecond); !errors.Is(err, ErrNoSandboxAvailable) {
+	if _, err := m.Allocate(ctx, "default", time.Minute, 50*time.Millisecond); !errors.Is(err, ErrNoSandboxAvailable) {
 		t.Errorf("want ErrNoSandboxAvailable, got %v", err)
 	}
 }
 
 func TestAllocateUnknownPool(t *testing.T) {
 	m := NewPodManager(fake.NewSimpleClientset(), "ironhive", testPoolConfig(0))
-	if _, err := m.Allocate(context.Background(), "nope", time.Second); !errors.Is(err, ErrUnknownPool) {
+	if _, err := m.Allocate(context.Background(), "nope", time.Minute, time.Second); !errors.Is(err, ErrUnknownPool) {
 		t.Errorf("want ErrUnknownPool, got %v", err)
 	}
 }
@@ -243,7 +253,7 @@ func TestAllocateWaitsForReady(t *testing.T) {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		st, err := m.Allocate(ctx, "default", 3*time.Second)
+		st, err := m.Allocate(ctx, "default", time.Minute, 3*time.Second)
 		ch <- result{st, err}
 	}()
 
@@ -272,7 +282,7 @@ func TestReleaseDestroysPod(t *testing.T) {
 	m.reconcile(ctx)
 	markReady(m)
 
-	st, err := m.Allocate(ctx, "default", time.Second)
+	st, err := m.Allocate(ctx, "default", time.Minute, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +319,7 @@ func TestReconcileReplacesAllocatedPod(t *testing.T) {
 
 	m.reconcile(ctx)
 	markReady(m)
-	if _, err := m.Allocate(ctx, "default", time.Second); err != nil {
+	if _, err := m.Allocate(ctx, "default", time.Minute, time.Second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -321,5 +331,74 @@ func TestReconcileReplacesAllocatedPod(t *testing.T) {
 	}
 	if len(pods.Items) != 3 {
 		t.Fatalf("after top-up: %d pods, want 3", len(pods.Items))
+	}
+}
+
+func TestRenewExtendsLease(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	st, err := m.Allocate(ctx, "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renewed, err := m.Renew(ctx, st.Name, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if until := time.Until(renewed.LeaseExpires); until < 59*time.Minute || until > time.Hour {
+		t.Errorf("renewed lease expires in %v, want ~1h", until)
+	}
+	pod, err := kube.CoreV1().Pods("ironhive").Get(ctx, st.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires, err := time.Parse(time.RFC3339, pod.Annotations[AnnotationLeaseExpires])
+	if err != nil || time.Until(expires) < 59*time.Minute {
+		t.Errorf("lease-expires annotation = %q, err = %v", pod.Annotations[AnnotationLeaseExpires], err)
+	}
+
+	// Renewing a standby pod fails.
+	m2 := NewPodManager(fake.NewSimpleClientset(), "ironhive", testPoolConfig(1))
+	m2.reconcile(ctx)
+	standby := m2.Pods()[0].Name
+	if _, err := m2.Renew(ctx, standby, time.Hour); !errors.Is(err, ErrSandboxNotAllocated) {
+		t.Errorf("renew standby: want ErrSandboxNotAllocated, got %v", err)
+	}
+	if _, err := m2.Renew(ctx, "sandbox-nope", time.Hour); !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("renew unknown: want ErrSandboxNotFound, got %v", err)
+	}
+}
+
+func TestReconcileReapsExpiredLease(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	// A one-millisecond lease is expired by the next reconcile pass.
+	st, err := m.Allocate(ctx, "default", time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	m.reconcile(ctx)
+
+	if _, err := kube.CoreV1().Pods("ironhive").Get(ctx, st.Name, metav1.GetOptions{}); err == nil {
+		t.Error("expired-lease pod was not deleted")
+	}
+	// The pool is topped back up.
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("after reap+top-up: %d pods, want 1", len(pods.Items))
 	}
 }

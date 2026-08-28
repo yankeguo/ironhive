@@ -50,6 +50,14 @@ pools:
             image: python:3.14
             command: ["/.ironhive/bin/ironhive-agent"]
             args: ["-listen", ":19173"]
+            # The controller hands out pods once they are Ready; gate the
+            # Ready condition on the agent actually serving, so an
+            # allocated sandbox never 502s on first contact. Not
+            # enforced by the controller — declared per template.
+            readinessProbe:
+              httpGet:
+                path: /healthz
+                port: 19173
             volumeMounts:
               - name: ironhive-bin
                 mountPath: /.ironhive/bin

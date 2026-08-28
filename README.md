@@ -44,21 +44,29 @@ For in-cluster operation, `deploy/rbac.yaml` is a ready-to-apply example scoped 
 The pod manager (`controller/pods.go`) keeps each pool's standby pods warm and tracks every managed pod in memory:
 
 - Pods are named `sandbox-<lowercase ULID>` and carry two enforced labels — `app.kubernetes.io/managed-by=ironhive-controller` (also the list/watch selector) and `ironhive.dev/pool=<pool name>` — merged over any template labels.
-- A list+watch loop maintains an in-memory map of pod states (phase, Ready condition, IP, allocation). A broken watch is re-established from a fresh list with backoff; a periodic reconcile is the safety net against missed events.
-- Reconcile tops each pool up to `standby.static.count` (allocated pods don't count — they are in use, not standby) and sweeps `Succeeded` / `Failed` pods.
-- **Allocation state lives on the pod object** as the `ironhive.dev/allocated` annotation. Claiming is a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition, so racing controller replicas cannot claim the same pod — the API server accepts exactly one. No leader election; state survives controller restarts and is shared by all replicas through the watch.
-- Sandboxes are **single-use**: releasing destroys the pod and reconcile tops the pool up with a fresh one.
+- A list+watch loop maintains an in-memory map of pod states (phase, Ready condition, IP, allocation, lease deadline). A broken watch is re-established from a fresh list with backoff; a periodic reconcile is the safety net against missed events.
+- Reconcile tops each pool up to `standby.static.count` (allocated pods don't count — they are in use, not standby), sweeps `Succeeded` / `Failed` pods, and destroys pods whose lease has expired.
+- **Allocation state lives on the pod object** as the `ironhive.dev/allocated` and `ironhive.dev/lease-expires` annotations. Claiming is a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition, so racing controller replicas cannot claim the same pod — the API server accepts exactly one. No leader election; state survives controller restarts and is shared by all replicas through the watch.
+- Every allocation carries a **lease**: the caller declares a duration at allocate time and extends it with `renew`; reconcile destroys the pod once the deadline passes, so a crashed caller can never leak a sandbox forever.
+- Sandboxes are **single-use**: releasing (or lease expiry) destroys the pod and reconcile tops the pool up with a fresh one.
+- Pod readiness is whatever the template declares: the example `config.yml` gates Ready on the agent's `/healthz` via a `readinessProbe`, so an allocated sandbox is already serving when handed out.
 
 ### API
 
 | Endpoint | Description |
 |---|---|
 | `GET /healthz` | Liveness probe, returns `{"message":"OK"}` |
-| `POST /controller/v1/allocate?pool=` | Claim one Ready standby pod of the pool; blocks up to 30 s waiting for one to become available. Returns `{"sandbox":"<pod name>"}`; `400` for a missing/unknown pool, `503` when none became available in time |
+| `POST /controller/v1/allocate?pool=&lease=` | Claim one Ready standby pod of the pool; blocks up to 30 s waiting for one to become available. `lease` is a mandatory Go duration string (`30s`, `5m`, `1h`) — the pod is destroyed when it expires unless renewed. Returns `{"sandbox":"<pod name>","leaseExpires":"<RFC3339>"}`; `400` for a missing/unknown pool or a missing/invalid lease, `503` when none became available in time |
+| `POST /controller/v1/renew?sandbox=&lease=` | Extend an allocated pod's lease to `lease` from now. Returns `{"sandbox":"<pod name>","leaseExpires":"<RFC3339>"}`; `400` for a missing/invalid lease, `404` for an unknown or unallocated sandbox |
 | `POST /controller/v1/release?sandbox=` | Destroy an allocated pod; the pool is topped up with a fresh standby pod asynchronously. Returns `{"released":"<pod name>"}`; `404` for an unknown or unallocated sandbox |
+| `GET /controller/v1/pools` | Read-only cluster overview for the dashboard: per-pool `standby` / `pending` / `allocated` counts plus every managed pod with phase, Ready, IP, allocation and lease deadline. Unauthenticated and CORS-open (`Access-Control-Allow-Origin: *`) by design |
 | `ANY /agent/**` | Reverse-proxy to the agent inside the pod named by the `X-Sandbox-ID` request header (`http://<podIP>:<agentPort>`); the path is preserved — the agent serves its own API under `/agent/v1/...`. `404` when the sandbox is unknown, unallocated, or has no IP yet; `502` when the agent cannot be reached |
 
 Parameter passing and response conventions follow the agent's: **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts); non-data responses (successes and errors alike) use the JSON envelope `{"message": ...}`.
+
+### Dashboard
+
+The home page is a read-only overview of the cluster: per-pool standby / pending / allocated counts and a live pod table (phase, readiness, IP, status, remaining lease, age), polling `GET /controller/v1/pools` every 3 s. It is unauthenticated and deliberately frameable — `X-Frame-Options` and CSP `frame-ancestors` are omitted so the page can be embedded into third-party systems via iframe. Deployment-level protection is an operator concern, layered in front of the controller.
 
 ## ironhive-agent
 

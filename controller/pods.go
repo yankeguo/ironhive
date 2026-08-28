@@ -30,10 +30,14 @@ const (
 )
 
 // AnnotationAllocated marks a pod as handed out to a client; its value is
-// the RFC3339 time of the allocation. The allocation fact lives on the pod
-// object itself, so it is shared across controller replicas and survives
-// controller restarts.
-const AnnotationAllocated = "ironhive.dev/allocated"
+// the RFC3339 time of the allocation. AnnotationLeaseExpires holds the
+// RFC3339 deadline of the allocation's lease — reconcile destroys the pod
+// once it passes. Both live on the pod object itself, so they are shared
+// across controller replicas and survive controller restarts.
+const (
+	AnnotationAllocated    = "ironhive.dev/allocated"
+	AnnotationLeaseExpires = "ironhive.dev/lease-expires"
+)
 
 // Errors returned by Allocate and Release, wrapped with context.
 var (
@@ -58,6 +62,9 @@ type PodState struct {
 	Ready     bool // the pod's Ready condition
 	// Allocated reports whether the pod has been handed out to a client.
 	Allocated bool
+	// LeaseExpires is the deadline of the allocation's lease; zero when
+	// the pod is not allocated. Expired pods are destroyed by reconcile.
+	LeaseExpires time.Time
 	// ResourceVersion is the pod's last seen resourceVersion, used as the
 	// optimistic-concurrency precondition when claiming the pod.
 	ResourceVersion string
@@ -202,19 +209,27 @@ func (m *PodManager) applyEvent(ev watch.Event) {
 }
 
 // reconcile tops up each pool to its standby count and sweeps terminated
-// pods so they do not pile up. Failures are logged and retried on the next
-// pass.
+// pods and expired leases so they do not pile up. Failures are logged and
+// retried on the next pass.
 func (m *PodManager) reconcile(ctx context.Context) {
 	m.mu.RLock()
 	active := make(map[string]int, len(m.cfg.Pools))
-	var terminated []string
+	var terminated, expired []string
+	now := time.Now()
 	for _, p := range m.pods {
 		// A freshly created pod has an empty phase until the API server
 		// fills it in; count anything not terminated as active — except
 		// allocated pods, which are in use and not standby capacity.
-		if p.Phase == corev1.PodSucceeded || p.Phase == corev1.PodFailed {
+		switch {
+		case p.Phase == corev1.PodSucceeded || p.Phase == corev1.PodFailed:
 			terminated = append(terminated, p.Name)
-		} else if !p.Allocated {
+		case p.Allocated:
+			// A zero LeaseExpires is far in the past, so allocated pods
+			// without a (parseable) lease are reaped too — no dead leases.
+			if now.After(p.LeaseExpires) {
+				expired = append(expired, p.Name)
+			}
+		default:
 			active[p.Pool]++
 		}
 	}
@@ -225,6 +240,13 @@ func (m *PodManager) reconcile(ctx context.Context) {
 			log.Println("pod manager: delete terminated pod", name, ":", err)
 		} else {
 			log.Println("pod manager: deleted terminated pod", name)
+		}
+	}
+	for _, name := range expired {
+		if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+			log.Println("pod manager: delete expired-lease pod", name, ":", err)
+		} else {
+			log.Println("pod manager: deleted pod", name, "with expired lease")
 		}
 	}
 
@@ -281,6 +303,9 @@ func podStateFrom(pod *corev1.Pod) *PodState {
 			ready = true
 		}
 	}
+	// An unparseable lease stays zero, i.e. already expired — fail-safe
+	// is reaping the pod.
+	leaseExpires, _ := time.Parse(time.RFC3339, pod.Annotations[AnnotationLeaseExpires])
 	return &PodState{
 		Name:            pod.Name,
 		Pool:            pod.Labels[LabelPool],
@@ -289,6 +314,7 @@ func podStateFrom(pod *corev1.Pod) *PodState {
 		Phase:           pod.Status.Phase,
 		Ready:           ready,
 		Allocated:       pod.Annotations[AnnotationAllocated] != "",
+		LeaseExpires:    leaseExpires,
 		ResourceVersion: pod.ResourceVersion,
 		CreatedAt:       pod.CreationTimestamp.Time,
 		UpdatedAt:       time.Now(),
@@ -306,22 +332,24 @@ func (m *PodManager) Lookup(name string) (PodState, bool) {
 	return *p, true
 }
 
-// Allocate claims one Ready standby pod of the pool for a client. When no
-// candidate is available it keeps polling the in-memory state until wait
-// elapses — reconcile tops the pool up in the meantime — and then returns
-// ErrNoSandboxAvailable. An unknown pool fails immediately.
+// Allocate claims one Ready standby pod of the pool for a client, leased
+// for the given duration — once the lease expires without renewal,
+// reconcile destroys the pod. When no candidate is available it keeps
+// polling the in-memory state until wait elapses — reconcile tops the pool
+// up in the meantime — and then returns ErrNoSandboxAvailable. An unknown
+// pool fails immediately.
 //
 // The claim is a patch carrying the pod's resourceVersion as an
 // optimistic-concurrency precondition, so racing controller replicas
 // cannot claim the same pod: the API server accepts exactly one of them.
-func (m *PodManager) Allocate(ctx context.Context, poolName string, wait time.Duration) (PodState, error) {
+func (m *PodManager) Allocate(ctx context.Context, poolName string, lease, wait time.Duration) (PodState, error) {
 	if _, ok := m.cfg.Pools[poolName]; !ok {
 		return PodState{}, fmt.Errorf("%w: %q", ErrUnknownPool, poolName)
 	}
 	deadline := time.Now().Add(wait)
 	for {
 		for _, st := range m.candidates(poolName) {
-			claimed, err := m.claim(ctx, st)
+			claimed, err := m.claim(ctx, st, lease)
 			if err == nil {
 				return claimed, nil
 			}
@@ -352,11 +380,14 @@ func (m *PodManager) candidates(poolName string) []PodState {
 	return out
 }
 
-// claim marks one pod allocated on the API server and mirrors the fact
-// into the in-memory state.
-func (m *PodManager) claim(ctx context.Context, st PodState) (PodState, error) {
-	patch := fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"annotations":{%q:%q}}}`,
-		st.ResourceVersion, AnnotationAllocated, time.Now().UTC().Format(time.RFC3339))
+// claim marks one pod allocated on the API server, with a lease expiring
+// lease from now, and mirrors the fact into the in-memory state.
+func (m *PodManager) claim(ctx context.Context, st PodState, lease time.Duration) (PodState, error) {
+	now := time.Now().UTC()
+	patch := fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"annotations":{%q:%q,%q:%q}}}`,
+		st.ResourceVersion,
+		AnnotationAllocated, now.Format(time.RFC3339),
+		AnnotationLeaseExpires, now.Add(lease).Format(time.RFC3339))
 	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, st.Name,
 		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
 	if err != nil {
@@ -375,6 +406,39 @@ func (m *PodManager) claim(ctx context.Context, st PodState) (PodState, error) {
 	m.mu.Unlock()
 	log.Println("pod manager: allocated pod", pod.Name, "of pool", st.Pool)
 	return *claimed, nil
+}
+
+// Renew extends the lease of an allocated pod to lease from now and
+// returns the refreshed state.
+func (m *PodManager) Renew(ctx context.Context, name string, lease time.Duration) (PodState, error) {
+	m.mu.RLock()
+	st, ok := m.pods[name]
+	m.mu.RUnlock()
+	if !ok {
+		return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
+	}
+	if !st.Allocated {
+		return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotAllocated, name)
+	}
+	// No resourceVersion precondition: renewal only pushes the deadline
+	// forward, so last write wins is fine.
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`,
+		AnnotationLeaseExpires, time.Now().UTC().Add(lease).Format(time.RFC3339))
+	pod, err := m.kube.CoreV1().Pods(m.namespace).Patch(ctx, name,
+		types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		return PodState{}, fmt.Errorf("patch pod %q: %w", name, err)
+	}
+	renewed := podStateFrom(pod)
+	m.mu.Lock()
+	if prev, ok := m.pods[pod.Name]; ok {
+		renewed.IP = prev.IP
+		renewed.Phase = prev.Phase
+		renewed.Ready = prev.Ready
+	}
+	m.pods[pod.Name] = renewed
+	m.mu.Unlock()
+	return *renewed, nil
 }
 
 // Release destroys an allocated pod. Sandboxes are single-use: the pool is
