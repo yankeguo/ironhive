@@ -16,15 +16,27 @@ import (
 
 func main() {
 	listen := envOr("IHC_LISTEN", ":8080")
+	kubeconfig := envOr("IHC_KUBECONFIG", "")
 	flag.StringVar(&listen, "listen", listen, "http listen address")
+	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig,
+		"kubeconfig path; defaults to the standard loading rules, with in-cluster config as fallback")
 	flag.Parse()
+
+	// The Kubernetes client is best-effort at startup: without it the web
+	// UI still serves, and the absence is loud in the logs.
+	kube, source, err := controller.NewKubernetesClient(kubeconfig)
+	if err != nil {
+		log.Println("kubernetes client unavailable:", err)
+	} else {
+		log.Println("kubernetes client ready:", source)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           controller.NewServer().Handler(),
+		Handler:           controller.NewServer(kube).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

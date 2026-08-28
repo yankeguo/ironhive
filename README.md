@@ -13,16 +13,26 @@ Retro on the server, modern in the build:
 
 | Path | Role |
 |---|---|
-| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`), graceful shutdown |
+| `cmd/ironhive-controller/` | Controller binary: flags (`-listen` / `IHC_LISTEN`, default `:8080`; `-kubeconfig` / `IHC_KUBECONFIG`), graceful shutdown |
 | `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers |
 | `controller/` | Controller package: HTTP server, views, static assets |
 | `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers |
+| `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback |
+| `deploy/rbac.yaml` | Example RBAC: ServiceAccount + Role (pods get/list/watch/create/update/patch/delete) in the `ironhive` namespace |
 | `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
 | `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
 | `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
 | `controller/web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
 | `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
 | `agent/` | Agent package: agent logic for managed containers, PID 1 zombie reaping |
+
+## ironhive-controller
+
+`ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. Flags: `-listen` / `IHC_LISTEN` (default `:8080`), `-kubeconfig` / `IHC_KUBECONFIG`.
+
+Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
+
+For in-cluster operation, `deploy/rbac.yaml` is a ready-to-apply example scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete, and the `RoleBinding` between them. Set `serviceAccountName: ironhive-controller` on the controller's Deployment to pick it up.
 
 ## ironhive-agent
 

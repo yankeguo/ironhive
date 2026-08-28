@@ -1,0 +1,45 @@
+# RBAC for the ironhive controller, scoped to the ironhive namespace.
+#
+# The controller resolves credentials with the in-cluster config as
+# fallback (see controller/kubernetes.go); inside a pod it authenticates
+# as this ServiceAccount, so its permissions are exactly the Role below:
+# full pod management (get/list/watch/create/update/patch/delete) inside
+# the ironhive namespace, nothing else in the cluster.
+#
+# Apply with: kubectl apply -f deploy/rbac.yaml
+# then set serviceAccountName: ironhive-controller on the controller's
+# Deployment / pod spec.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ironhive
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ironhive-controller
+  namespace: ironhive
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ironhive-controller
+subjects:
+  - kind: ServiceAccount
+    name: ironhive-controller
+    namespace: ironhive

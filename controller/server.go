@@ -5,12 +5,18 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
 )
 
-type Server struct{}
+type Server struct {
+	// Kubernetes is the client for the cluster hosting the managed
+	// containers; nil when no credentials were resolvable at startup.
+	Kubernetes kubernetes.Interface
+}
 
-func NewServer() *Server {
-	return &Server{}
+func NewServer(kube kubernetes.Interface) *Server {
+	return &Server{Kubernetes: kube}
 }
 
 func (s *Server) Handler() http.Handler {
