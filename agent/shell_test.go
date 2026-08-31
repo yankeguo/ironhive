@@ -248,6 +248,76 @@ func TestCuratedEnv(t *testing.T) {
 	}
 }
 
+func TestLoadEnvPatterns(t *testing.T) {
+	write := func(content string) string {
+		path := filepath.Join(t.TempDir(), "agent.yml")
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// A missing file, a file without the field, and an unparsable file all
+	// mean no override: the built-in allowlist applies.
+	for _, path := range []string{
+		filepath.Join(t.TempDir(), "nope"),
+		write("other_field: true\n"),
+		write("allowed_envs: [unclosed\n"),
+	} {
+		if _, override := loadEnvPatterns(path); override {
+			t.Fatalf("loadEnvPatterns(%q) override = true, want false", path)
+		}
+	}
+
+	// An explicitly empty list is an override too: nothing passes through.
+	patterns, override := loadEnvPatterns(write("allowed_envs: []\n"))
+	if !override || len(patterns) != 0 {
+		t.Fatalf("loadEnvPatterns(empty) = %v, %v, want [], true", patterns, override)
+	}
+
+	// Comments, quoted entries and invalid patterns (ignored with a log).
+	patterns, override = loadEnvPatterns(write(
+		"# image-specific vars\nallowed_envs:\n  - APP_*\n  - 'JAVA_OPTS'\n  - '[BAD'\n  - '?'\n"))
+	want := []string{"APP_*", "JAVA_OPTS", "?"}
+	if !override || len(patterns) != len(want) {
+		t.Fatalf("loadEnvPatterns = %v, %v, want %v, true", patterns, override, want)
+	}
+	for i := range want {
+		if patterns[i] != want[i] {
+			t.Fatalf("loadEnvPatterns = %v, want %v", patterns, want)
+		}
+	}
+}
+
+func TestEnvAllowed(t *testing.T) {
+	patterns := []string{"APP_*", "JAVA_OPTS"}
+
+	// No override: built-in allowlist and LC_* apply (patterns is empty
+	// then, but must be ignored anyway).
+	for _, key := range []string{"PATH", "LC_ALL"} {
+		if !envAllowed(key, patterns, false) {
+			t.Fatalf("envAllowed(%q, _, false) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"KUBERNETES_SERVICE_HOST", "APP_HOME"} {
+		if envAllowed(key, patterns, false) {
+			t.Fatalf("envAllowed(%q, _, false) = true, want false", key)
+		}
+	}
+
+	// Override: patterns are the complete allowlist.
+	for _, key := range []string{"APP_HOME", "APP_", "JAVA_OPTS"} {
+		if !envAllowed(key, patterns, true) {
+			t.Fatalf("envAllowed(%q, patterns, true) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"PATH", "LC_ALL", "APP", "JAVA_OPTSX", "AWS_SECRET_ACCESS_KEY"} {
+		if envAllowed(key, patterns, true) {
+			t.Fatalf("envAllowed(%q, patterns, true) = true, want false", key)
+		}
+	}
+}
+
 func TestShellParallel(t *testing.T) {
 	call := func() int {
 		form := url.Values{"command": {"sleep 1"}}
