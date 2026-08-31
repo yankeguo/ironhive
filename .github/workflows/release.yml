@@ -22,19 +22,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: setup-bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: controller/web/package.json
-
-      - name: frontend-install
-        working-directory: controller/web
-        run: bun install --frozen-lockfile
-
-      - name: frontend-typecheck-and-build
-        working-directory: controller/web
-        run: bun run typecheck && bun run build
-
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"

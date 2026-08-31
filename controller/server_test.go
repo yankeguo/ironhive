@@ -264,25 +264,8 @@ func TestSecurityHeaders(t *testing.T) {
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("X-Content-Type-Options = %q", got)
 	}
-	csp := rec.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "style-src 'self'") || strings.Contains(csp, "unsafe-inline") {
-		t.Fatalf("Content-Security-Policy = %q", csp)
-	}
-	if got := rec.Header().Get("X-Frame-Options"); got != "" {
-		t.Fatalf("X-Frame-Options = %q, want deliberately absent", got)
-	}
-}
-
-func TestRenderTemplateBuffersErrors(t *testing.T) {
-	body, err := renderTemplate("home.html", map[string]any{"Nav": "home"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body), `aria-current="page"`) {
-		t.Fatal("rendered home page is missing current-page navigation")
-	}
-	if _, err := renderTemplate("missing.html", nil); err == nil {
-		t.Fatal("missing template did not return an error")
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
 	}
 }
 

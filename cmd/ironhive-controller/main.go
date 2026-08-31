@@ -35,8 +35,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The Kubernetes client is best-effort at startup: without it the web
-	// UI still serves, and the absence is loud in the logs.
+	// The Kubernetes client is best-effort at startup: without it the API
+	// still serves, and the absence is loud in the logs.
 	kube, source, err := controller.NewKubernetesClient(cfg.Kubernetes.Kubeconfig)
 	if err != nil {
 		log.Println("kubernetes client unavailable:", err)
@@ -48,7 +48,7 @@ func main() {
 	defer stop()
 
 	// The pod manager keeps standby pods warm; like the client it is
-	// best-effort — without pools or a cluster the web UI still serves.
+	// best-effort — without pools or a cluster the API still serves.
 	var pm *controller.PodManager
 	if kube != nil && len(cfg.Pools) > 0 {
 		pm = controller.NewPodManager(kube, cfg.Kubernetes.Namespace, cfg)

@@ -2,12 +2,7 @@
 
 Warm pools of sandbox containers on Kubernetes. `ironhive-controller` keeps a configurable number of standby pods per pool, hands them out over HTTP, and reverse-proxies each pod's in-container API; `ironhive-agent` runs as PID 1 inside every sandbox pod and exposes file / tar / dir / shell endpoints.
 
-The controller's web UI is retro on the server, modern in the build:
-
-- **std `net/http` only** — Go 1.22+ pattern routing (`GET /{$}`, `GET /static/`, `{id}` wildcards), security headers, graceful shutdown with no deadline. No web framework, no router dependency.
-- **Bun multi-entry build** — every `.ts` / `.css` file in `web/src/entries/` is bundled by `web/build.ts` (`Bun.build`, IIFE, minified) into `web/dist/<name>-<hash>.<ext>`. `main.css` is a full Tailwind v4 build (`bun-plugin-tailwind`) with build-time lucide icons via `@iconify/tailwind4`.
-- **`html/template` views** — embedded with `//go:embed`, referencing bundles only by entry name: `{{cssAsset "main"}}`, `{{jsAsset "home"}}`. Hash resolution happens in `web_static.go`.
-- **Immutable static serving** — `web/dist` is embedded (`//go:embed all:web/dist`) and served at `GET /static/` with `Cache-Control: public, max-age=31536000, immutable`, so hashed assets are cached forever and new builds get new URLs.
+The controller is a plain JSON API: **std `net/http` only** — Go 1.22+ pattern routing, security headers, graceful shutdown with no deadline. No web framework, no router dependency.
 
 ## Layout
 
@@ -15,31 +10,26 @@ The controller's web UI is retro on the server, modern in the build:
 |---|---|
 | `cmd/ironhive-controller/` | Controller binary: flag `-config` / `IHC_CONFIG` (default `config.yml`) — every other setting lives in the config file; graceful shutdown |
 | `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers |
-| `controller/` | Controller package: HTTP server, pod manager, views, static assets |
-| `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, page handlers, allocate/release endpoints, `/agent/` reverse proxy |
+| `controller/` | Controller package: HTTP server, pod manager |
+| `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, allocate/release endpoints, `/agent/` reverse proxy |
 | `controller/pods.go` | Pod manager: standby reconcile, list+watch in-memory state, allocate/release with cross-replica claims |
 | `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback; namespace resolution |
 | `controller/config.go` | `config.yml` loading: sections `http` (`listen`, default `:8080`), `kubernetes` (`kubeconfig`, `namespace`), and `pools.<name>` with `standby.static.count` (default 10) and `podTemplate` (`corev1.PodTemplateSpec`; the agent port is derived from its container ports) |
 | `config.example.yml` | Example controller configuration with one `default` pool |
 | `agent.example.yml` | Example agent configuration (image-provided `/etc/ironhive/agent.yml`: `allowed_envs` shell env passthrough) |
 | `manifest.yml` | Full demo deployment: RBAC (ServiceAccount + namespaced Role for pods, leader-election leases and events), ConfigMap with the controller config, 3-replica Deployment, Service |
-| `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
-| `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
-| `controller/web/build.ts` | Bun build: bundles every entry in `src/entries/` into hashed IIFEs in `dist/` |
-| `controller/web/src/entries/` | One file per bundle: page TS entries plus `main.css` (Tailwind v4) |
-| `controller/web/view/` | Go templates; `base.html` defines shared `head` / `nav` blocks |
 | `client.go`, `sandbox.go` | Root Go client package `ironhive`: controller endpoints (allocate/renew/release/pools) plus agent pass-through (file/tar/dir/shell) via the `Sandbox` handle |
 | `agent/` | Agent package: agent logic for managed containers, PID 1 zombie reaping |
 
 ## ironhive-controller
 
-`ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. The only command-line flag is `-config` / `IHC_CONFIG` (default `config.yml`) — every other setting lives in the config file.
+`ironhive-controller` exposes the HTTP API and drives the managed containers through the Kubernetes API. The only command-line flag is `-config` / `IHC_CONFIG` (default `config.yml`) — every other setting lives in the config file.
 
 The config file is organized in sections: `http.listen` (HTTP listen address, default `:8080`), `kubernetes.kubeconfig` (explicit kubeconfig path; unset resolves the standard loading rules with the in-cluster config as fallback) and `kubernetes.namespace` (where managed pods live; default is the in-cluster service-account namespace, else `default`), plus the container pools: `pools.<name>.standby.static.count` (warm pods kept ready, default 10) and `pools.<name>.podTemplate` (a full Kubernetes pod template, parsed as `corev1.PodTemplateSpec`). The agent's listen port inside the pod is derived from the template's container ports: the one named `http-ironhive` wins, else the first declared port, else the default 19173. See the annotated `config.example.yml` in the repo root. An absent config file is tolerated (defaults, no pools); a present-but-invalid one fails startup.
 
 Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
 
-For in-cluster operation, `manifest.yml` is a ready-to-apply demo scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete plus coordination.k8s.io leases and events (leader election), and the `RoleBinding` between them; a `ConfigMap` carrying the controller config; a 3-replica `Deployment` running `ghcr.io/yankeguo/ironhive:controller-latest` with `serviceAccountName: ironhive-controller` and the config mounted at `/etc/ironhive/config.yml`; and a `Service` exposing the web UI and API.
+For in-cluster operation, `manifest.yml` is a ready-to-apply demo scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete plus coordination.k8s.io leases and events (leader election), and the `RoleBinding` between them; a `ConfigMap` carrying the controller config; a 3-replica `Deployment` running `ghcr.io/yankeguo/ironhive:controller-latest` with `serviceAccountName: ironhive-controller` and the config mounted at `/etc/ironhive/config.yml`; and a `Service` exposing the API.
 
 ### Pod manager
 
@@ -62,14 +52,10 @@ The pod manager (`controller/pods.go`) keeps each pool's standby pods warm and t
 | `POST /controller/v1/allocate?pool=&lease=` | Claim one Ready standby pod of the pool; blocks up to 30 s waiting for one to become available. `lease` is a mandatory Go duration string (`30s`, `5m`, `1h`) — the pod is destroyed when it expires unless renewed. Returns `{"sandbox":"<pod name>","leaseExpires":"<RFC3339>"}`; `400` for a missing/unknown pool or a missing/invalid lease, `503` when none became available in time |
 | `POST /controller/v1/renew?sandbox=&lease=` | Extend an allocated pod's lease to `lease` from now. Returns `{"sandbox":"<pod name>","leaseExpires":"<RFC3339>"}`; `400` for a missing/invalid lease, `404` for an unknown or unallocated sandbox |
 | `POST /controller/v1/release?sandbox=` | Destroy an allocated pod; the pool is topped up with a fresh standby pod asynchronously. Returns `{"released":"<pod name>"}`; `404` for an unknown or unallocated sandbox |
-| `GET /controller/v1/pools` | Read-only cluster overview for the dashboard: per-pool `standby` / `pending` / `allocated` counts plus every managed pod with phase, Ready, deleting state, IP, allocation and lease deadline. Terminating pods remain visible but are excluded from capacity counts. Unauthenticated and CORS-open (`Access-Control-Allow-Origin: *`) by design |
+| `GET /controller/v1/pools` | Read-only cluster overview: per-pool `standby` / `pending` / `allocated` counts plus every managed pod with phase, Ready, deleting state, IP, allocation and lease deadline. Terminating pods remain visible but are excluded from capacity counts. Unauthenticated and CORS-open (`Access-Control-Allow-Origin: *`) by design |
 | `ANY /agent/**` | Reverse-proxy to the agent inside the pod named by the `X-Sandbox-ID` request header (`http://<podIP>:<agentPort>`); the path is preserved — the agent serves its own API under `/agent/v1/...`. `404` when the sandbox is unknown, unallocated, terminating, or has no IP yet; `502` when the agent cannot be reached |
 
 Parameter passing and response conventions follow the agent's: **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts); non-data responses (successes and errors alike) use the JSON envelope `{"message": ...}`.
-
-### Dashboard
-
-The home page is a read-only overview of the cluster: per-pool standby / pending / allocated counts and a live pod table (phase, readiness, IP, status, remaining lease, age), polling `GET /controller/v1/pools` every 3 s. It is unauthenticated and deliberately frameable — `X-Frame-Options` and CSP `frame-ancestors` are omitted so the page can be embedded into third-party systems via iframe. Deployment-level protection is an operator concern, layered in front of the controller.
 
 ## Go client
 
@@ -163,17 +149,12 @@ The agent is deliberately low-level; the harness (timeouts, budget enforcement, 
 ## Develop
 
 ```bash
-# terminal 1: rebuild bundles on change (unminified, inline sourcemaps)
-(cd controller/web && bun install && bun run dev)
-
-# terminal 2: run the controller
 go run ./cmd/ironhive-controller
 ```
 
 ## Build
 
 ```bash
-(cd controller/web && bun install --frozen-lockfile && bun run typecheck && bun run build)
 gofmt -l . # must print nothing
 go vet ./...
 go test ./...
@@ -181,20 +162,9 @@ go test -race ./...
 go build ./...
 ```
 
-`controller/web/dist` is git-ignored (only `.gitkeep` is committed), so always run the frontend build before `go build` — in Docker, do it in an `oven/bun` stage.
-
 ## Release
 
-`.github/workflows/release.yml` runs the full frontend and Go quality suite for pull requests and pushes. On `main` / tag pushes only, a successful quality job builds and pushes `ghcr.io/<owner>/<repo>` and `quay.io/<owner>/<repo>` (login via the `QUAY_USERNAME` / `QUAY_PASSWORD` action secrets) via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
+`.github/workflows/release.yml` runs the Go quality suite for pull requests and pushes. On `main` / tag pushes only, a successful quality job builds and pushes `ghcr.io/<owner>/<repo>` and `quay.io/<owner>/<repo>` (login via the `QUAY_USERNAME` / `QUAY_PASSWORD` action secrets) via the multi-stage `Dockerfile.controller` and `Dockerfile.agent`, with tags prefixed by component:
 
 - push `main` → `controller-latest` / `agent-latest` and `controller-latest-<short_sha>` / `agent-latest-<short_sha>`
 - push a git tag → `controller-<tag>` / `agent-<tag>`
-
-Note: the bun stage mirrors the repo layout (`WORKDIR /repo/controller/web`, `COPY controller/*.go /repo/controller/`) because `main.css`'s Tailwind `@source "../../../*.go"` resolves relative to the CSS file — without the Go files next to `web/`, the glob lands on the container root and the build hangs scanning the whole filesystem.
-
-## Adding a page
-
-1. Add a route in `controller/server.go`, e.g. `mux.HandleFunc("GET /about", s.handleAbout)`.
-2. Add a view `controller/web/view/about.html` with `{{template "head" .}}` and `<script src="{{jsAsset "about"}}" defer></script>`.
-3. Add an entry `controller/web/src/entries/about.ts`.
-4. `bun run build` — the new `about-<hash>.js` is picked up automatically.

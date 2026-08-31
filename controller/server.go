@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"log"
@@ -11,7 +10,6 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -52,69 +50,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /controller/v1/renew", s.handleRenew)
 	mux.HandleFunc("GET /controller/v1/pools", s.handlePools)
 	mux.HandleFunc("/agent/", s.handleAgentProxy)
-	mux.HandleFunc("GET /{$}", s.handleHome)
-	mux.HandleFunc("GET /about", s.handleAbout)
-	mux.Handle("GET /static/", staticHandler())
 	return s.withSecurityHeaders(mux)
 }
 
-// withSecurityHeaders deliberately allows framing: the dashboard is a
-// read-only, unauthenticated overview meant to be embedded into
-// third-party systems via iframe, so X-Frame-Options and frame-ancestors
-// are left out on purpose. Deployment-level protection is handled by the
-// operator, not here.
+// withSecurityHeaders applies generic API hygiene headers. Framing is not
+// restricted: there is no HTML to frame, and access control is a
+// deployment-level concern layered in front of the controller.
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
-		h.Set("Content-Security-Policy", strings.Join([]string{
-			"default-src 'none'",
-			"script-src 'self'",
-			"style-src 'self'",
-			"img-src 'self' data:",
-			"connect-src 'self'",
-			"form-action 'self'",
-			"base-uri 'none'",
-		}, "; "))
 		next.ServeHTTP(w, r)
 	})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "OK"})
-}
-
-func (s *Server) handleHome(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "home.html", map[string]any{
-		"Nav": "home",
-	})
-}
-
-func (s *Server) handleAbout(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "about.html", map[string]any{
-		"Nav": "about",
-	})
-}
-
-func (s *Server) render(w http.ResponseWriter, name string, data any) {
-	body, err := renderTemplate(name, data)
-	if err != nil {
-		log.Println("template:", err)
-		writeError(w, http.StatusInternalServerError, "template rendering failed")
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(body)
-}
-
-func renderTemplate(name string, data any) ([]byte, error) {
-	var body bytes.Buffer
-	if err := webTmpl.ExecuteTemplate(&body, name, data); err != nil {
-		return nil, err
-	}
-	return body.Bytes(), nil
 }
 
 // handleAllocate hands one Ready standby pod of the requested pool to the
@@ -236,7 +189,7 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// poolSummary aggregates the pod counts of one pool for the dashboard.
+// poolSummary aggregates the pod counts of one pool for the overview API.
 type poolSummary struct {
 	Name      string `json:"name"`
 	Standby   int    `json:"standby"`
@@ -244,7 +197,7 @@ type poolSummary struct {
 	Allocated int    `json:"allocated"`
 }
 
-// podInfo is the dashboard view of one managed pod.
+// podInfo is the API view of one managed pod.
 type podInfo struct {
 	Name         string `json:"name"`
 	Pool         string `json:"pool"`
@@ -257,8 +210,8 @@ type podInfo struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
-// handlePools serves the read-only cluster overview behind the dashboard:
-// per-pool standby/pending/allocated counts plus every managed pod. It is
+// handlePools serves the read-only cluster overview: per-pool
+// standby/pending/allocated counts plus every managed pod. It is
 // unauthenticated and CORS-open by design — the data is not sensitive and
 // third-party systems are encouraged to embed it.
 func (s *Server) handlePools(w http.ResponseWriter, _ *http.Request) {

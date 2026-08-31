@@ -150,7 +150,7 @@ func (c *Client) Release(ctx context.Context, name string) error {
 	return nil
 }
 
-// Pools fetches the read-only cluster overview behind the dashboard.
+// Pools fetches the read-only cluster overview.
 func (c *Client) Pools(ctx context.Context) (*PoolsState, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/controller/v1/pools", nil, nil, nil)
 	if err != nil {

@@ -8,7 +8,7 @@
 #   ConfigMap      — the controller config (mounted at /etc/ironhive/config.yml)
 #   Deployment     — 3 controller replicas; reconcile is single-writer via
 #     leader election, allocate/renew/release run on every replica
-#   Service        — ClusterIP access to the controller HTTP port (web UI + API)
+#   Service        — ClusterIP access to the controller HTTP API
 #
 # Apply with: kubectl apply -f manifest.yml
 apiVersion: v1

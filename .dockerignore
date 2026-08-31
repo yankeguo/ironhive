@@ -4,5 +4,3 @@
 *.md
 *_test.go
 LICENSE
-controller/web/node_modules
-controller/web/dist
