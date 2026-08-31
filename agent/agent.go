@@ -5,6 +5,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -191,8 +192,15 @@ func directChildren(parent int) ([]int, error) {
 		}
 		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
 		if err != nil {
-			// Processes can disappear between ReadDir and ReadFile.
-			continue
+			// Processes can disappear between ReadDir and ReadFile; only
+			// that race justifies skipping. Anything else (e.g. a
+			// hidepid-mounted procfs) makes the listing unreliable, so
+			// hand the error to the caller's conservative fallback
+			// instead of returning a silently incomplete list.
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, err
 		}
 		ppid, err := procParentPID(data)
 		if err == nil && ppid == parent {

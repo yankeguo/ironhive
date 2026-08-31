@@ -134,8 +134,11 @@ func curatedEnv(base []string) []string {
 // state is reported. The paths are agent-generated (os.MkdirTemp) and
 // embedded via shellQuote — adjacent single-quoted segments concatenate,
 // so nothing in the trap argument is ever expanded, at definition or at
-// run time; no shell variable or env entry carries them, so the command
-// cannot see or tamper with them.
+// run time: the paths can never leak through a quoting or expansion
+// accident. A deliberately hostile command can still read the trap
+// definition (`trap -p EXIT`) and subvert the snapshot; that is
+// acceptable because the reported cwd/env state is only advisory input
+// to the caller's own next request, not a security boundary.
 func buildShellWrapper(command, envPath, pwdPath string) string {
 	return "trap 'pwd > " + shellQuote(pwdPath) + " 2>/dev/null; env -0 > " + shellQuote(envPath) + ` 2>/dev/null' EXIT
 ` + command

@@ -368,11 +368,14 @@ func TarPutHandler() http.HandlerFunc {
 
 func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 	tr := tar.NewReader(rd)
-	// Directory mtimes are restored after the walk, deepest first:
-	// extracting files into a directory bumps its mtime, so parents must
-	// be stamped after their children.
+	// Directory modes and mtimes are restored after the walk, deepest
+	// first: applying a read-only archive mode up front would block
+	// extracting the directory's children, and extracting files into a
+	// directory bumps its mtime, so parents must be stamped after their
+	// children.
 	var dirStamps []struct {
 		path  string
+		mode  os.FileMode
 		mtime time.Time
 	}
 	for {
@@ -392,23 +395,27 @@ func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 			if !filter.included(hdr.Name) {
 				continue
 			}
-			if err := os.MkdirAll(target, tarPerm(hdr, 0o755)); err != nil {
+			// New directories are always created writable; the archive
+			// mode is applied in the deferred pass below, like GNU tar,
+			// so a read-only mode cannot block the extraction of the
+			// directory's children.
+			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
 			}
-			// MkdirAll leaves existing directories untouched and applies
-			// umask to new ones, so restore the archive mode explicitly.
-			if err := os.Chmod(target, tarPerm(hdr, 0o755)); err != nil {
-				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
-			}
-			if !hdr.ModTime.IsZero() {
-				dirStamps = append(dirStamps, struct {
-					path  string
-					mtime time.Time
-				}{target, hdr.ModTime})
-			}
+			dirStamps = append(dirStamps, struct {
+				path  string
+				mode  os.FileMode
+				mtime time.Time
+			}{target, tarPerm(hdr, 0o755), hdr.ModTime})
 		case tar.TypeReg, tar.TypeRegA:
 			if !filter.included(hdr.Name) {
 				continue
+			}
+			// An entry named "." resolves to dest itself; opening the
+			// destination directory as a file would surface as a 500 for
+			// what is a client mistake.
+			if target == dest {
+				return fmt.Errorf("tar: %w: entry %q is the destination directory", errBadTar, hdr.Name)
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("tar: %s: %w", hdr.Name, err)
@@ -420,11 +427,19 @@ func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 			return fmt.Errorf("tar: %w: unsupported entry type %d (%s)", errBadTar, hdr.Typeflag, hdr.Name)
 		}
 	}
-	// Best effort: content matters more than timestamps. Archive order is
-	// parents before children, so walking the slice backwards stamps the
-	// deepest directories first.
+	// The deferred pass restores the archive modes (MkdirAll leaves
+	// existing directories untouched and applies umask to new ones) and,
+	// best effort, the mtimes: content matters more than timestamps.
+	// Archive order is parents before children, so walking the slice
+	// backwards handles the deepest directories first. chmod runs before
+	// Chtimes but the order is free: chmod touches ctime, not mtime.
 	for i := len(dirStamps) - 1; i >= 0; i-- {
-		_ = os.Chtimes(dirStamps[i].path, dirStamps[i].mtime, dirStamps[i].mtime)
+		if err := os.Chmod(dirStamps[i].path, dirStamps[i].mode); err != nil {
+			return fmt.Errorf("tar: %s: %w", dirStamps[i].path, err)
+		}
+		if !dirStamps[i].mtime.IsZero() {
+			_ = os.Chtimes(dirStamps[i].path, dirStamps[i].mtime, dirStamps[i].mtime)
+		}
 	}
 	return nil
 }

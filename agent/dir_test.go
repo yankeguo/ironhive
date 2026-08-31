@@ -117,6 +117,37 @@ func TestDirPutChmodChown(t *testing.T) {
 	}
 }
 
+func TestDirPutKeepsExistingMode(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "keep")
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o700); err != nil { // defeat umask
+		t.Fatal(err)
+	}
+	// A plain mkdir -p style request must not re-permission an existing
+	// directory.
+	req := httptest.NewRequest(http.MethodPut, dirTarget(p, ""), nil)
+	rec := httptest.NewRecorder()
+	DirPutHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o700 {
+		t.Fatalf("mode = %o, want 700", st.Mode().Perm())
+	}
+	// An explicit chmod still applies to the existing directory.
+	req = httptest.NewRequest(http.MethodPut, dirTarget(p, "&chmod=0750"), nil)
+	rec = httptest.NewRecorder()
+	DirPutHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o750 {
+		t.Fatalf("mode = %o, want 750", st.Mode().Perm())
+	}
+}
+
 func TestDirPutErrors(t *testing.T) {
 	dir := t.TempDir()
 	req := httptest.NewRequest(http.MethodPut, "/v1/dir", nil)

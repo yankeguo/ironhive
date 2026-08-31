@@ -161,6 +161,9 @@ func TestFilesPutErrors(t *testing.T) {
 	if rec := put(t, putTarget(filepath.Join(dir, "a"), "&chown=no-such-user-xyz:grp"), "x"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown chown user: status = %d, want 400", rec.Code)
 	}
+	if rec := put(t, putTarget(filepath.Join(dir, "a"), "&chown=0:-2"), "x"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("chown id below -1: status = %d, want 400", rec.Code)
+	}
 	if rec := put(t, putTarget(t.TempDir(), ""), "x"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("existing directory target: status = %d, want 400", rec.Code)
 	}

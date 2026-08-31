@@ -429,6 +429,12 @@ func resolveUserID(s string) (int, error) {
 		return -1, nil
 	}
 	if n, err := strconv.Atoi(s); err == nil {
+		// -1 means "leave unchanged" and non-negative ids are real;
+		// anything below would only fail later in the syscall (EINVAL),
+		// disguising a client input error as a 500.
+		if n < -1 {
+			return -1, fmt.Errorf("invalid chown user %q: id must be >= -1", s)
+		}
 		return n, nil
 	}
 	u, err := user.Lookup(s)
@@ -443,6 +449,10 @@ func resolveGroupID(s string) (int, error) {
 		return -1, nil
 	}
 	if n, err := strconv.Atoi(s); err == nil {
+		// Same guard as resolveUserID.
+		if n < -1 {
+			return -1, fmt.Errorf("invalid chown group %q: id must be >= -1", s)
+		}
 		return n, nil
 	}
 	g, err := user.LookupGroup(s)

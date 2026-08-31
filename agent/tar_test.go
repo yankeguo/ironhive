@@ -113,6 +113,37 @@ func TestTarPutOverwrite(t *testing.T) {
 	}
 }
 
+func TestTarPutReadOnlyDir(t *testing.T) {
+	// Root's CAP_DAC_OVERRIDE lets file creation succeed even inside a
+	// read-only directory, masking the bug this test guards.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: read-only dir does not block extraction")
+	}
+	dest := filepath.Join(t.TempDir(), "out")
+	body := buildTar(t, []tarEntry{
+		{name: "ro", typ: tar.TypeDir, mode: 0o555},
+		{name: "ro/child.txt", typ: tar.TypeReg, mode: 0o644, body: "child"},
+	})
+	rec := putTar(t, dest, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body)
+	}
+	if data, err := os.ReadFile(filepath.Join(dest, "ro", "child.txt")); err != nil || string(data) != "child" {
+		t.Fatalf("child.txt: data = %q, err = %v", data, err)
+	}
+	st, err := os.Stat(filepath.Join(dest, "ro"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o555 {
+		t.Fatalf("mode = %o, want 555", st.Mode().Perm())
+	}
+	// Restore writability so the TempDir cleanup can remove the tree.
+	if err := os.Chmod(filepath.Join(dest, "ro"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTarPutCreatesDestination(t *testing.T) {
 	// The target directory (and its parents) are created automatically.
 	dest := filepath.Join(t.TempDir(), "x", "y", "z")
@@ -149,6 +180,12 @@ func TestTarPutErrors(t *testing.T) {
 		{name: "link", typ: tar.TypeSymlink, mode: 0o777},
 	})); rec.Code != http.StatusBadRequest {
 		t.Fatalf("symlink entry: status = %d, want 400", rec.Code)
+	}
+	// A regular-file entry named "." resolves to the destination itself.
+	if rec := putTar(t, dest, buildTar(t, []tarEntry{
+		{name: ".", typ: tar.TypeReg, mode: 0o644, body: "x"},
+	})); rec.Code != http.StatusBadRequest {
+		t.Fatalf("file entry resolving to dest: status = %d, want 400", rec.Code)
 	}
 	// The target being an existing file is a client error too.
 	f := filepath.Join(t.TempDir(), "file.txt")

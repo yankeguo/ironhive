@@ -84,22 +84,29 @@ func DirPutHandler() http.HandlerFunc {
 		if !ok {
 			return
 		}
+		// Stat before MkdirAll: a pre-existing directory keeps its mode
+		// unless the request carries an explicit chmod — like mkdir -p,
+		// a plain create request must never re-permission it.
+		_, statErr := os.Stat(p)
 		if err := os.MkdirAll(p, mode); err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// MkdirAll only applies mode to newly created directories (and
-		// umask interferes), so set ownership and mode explicitly; chown
-		// first as it may clear mode bits.
+		// chown first as it may clear mode bits.
 		if uid >= 0 || gid >= 0 {
 			if err := os.Chown(p, uid, gid); err != nil {
 				writeError(w, "chown: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
-		if err := os.Chmod(p, mode); err != nil {
-			writeError(w, "chmod: "+err.Error(), http.StatusInternalServerError)
-			return
+		// MkdirAll only applies mode to newly created directories (and
+		// umask interferes), so chmod explicitly when the directory was
+		// just created or the request named a mode.
+		if r.URL.Query().Get("chmod") != "" || statErr != nil {
+			if err := os.Chmod(p, mode); err != nil {
+				writeError(w, "chmod: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		writeMessage(w, http.StatusOK, "OK")
 	}
