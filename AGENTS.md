@@ -47,7 +47,7 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 
 - std `net/http` only; Go 1.22+ method+path mux patterns. No web framework, no router dependency.
 - One `_test.go` per source file, same package. Kubernetes code is tested with `k8s.io/client-go/kubernetes/fake`; HTTP handlers with `httptest`. The `agent/` package is the style benchmark.
-- The controller takes exactly one flag/env pair — `-config` / `IHC_CONFIG`; every other setting (`http.listen`, `kubernetes.kubeconfig`, `kubernetes.namespace`, pools) lives in the config file, grouped in `http:` / `kubernetes:` / `pools:` sections. The agent takes command-line flags only — no env vars by design.
+- Both binaries take exactly one flag — `-config` — pointing at a YAML config file; every other setting lives in the file (controller: `http:` / `kubernetes:` / `pools:` sections; agent: `http.listen`, `allowed_envs`). Absent file = defaults, present-but-invalid = startup failure. No environment variables: flag plus default is enough, and the agent's process environment is visible to sandboxed commands (it is their PID 1).
 - Graceful shutdown: `signal.NotifyContext` for SIGINT/SIGTERM, second signal kills, `srv.Shutdown` with no deadline.
 - Comments explain *why*, matching the density of the surrounding file.
 
@@ -58,7 +58,7 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 ## Deploy references
 
 - `config.example.yml` — annotated example pool config (`standby.static.count`, `podTemplate`; agent port derived from `podTemplate` container ports — `http-ironhive` wins, else the first, else 19173).
-- `agent.example.yml` — annotated example agent config (image-provided `/etc/ironhive/agent.yml`; `allowed_envs` wildcard patterns fully replace the built-in shell env allowlist, absent file/field falls back to defaults).
+- `agent.example.yml` — annotated example agent config (image-provided `/opt/ironhive/etc/agent.yml`: `http.listen`; `allowed_envs` wildcard patterns fully replace the built-in shell env allowlist, absent file/field falls back to defaults).
 - `manifest.yml` — full demo deployment in namespace `ironhive`: namespaced Role for the controller (pods get/list/watch/create/update/patch/delete, coordination.k8s.io leases, and events), ConfigMap with the controller config, 3-replica Deployment, Service.
 - `Dockerfile.controller` / `Dockerfile.agent` — multi-stage builds; images published as `ghcr.io/yankeguo/ironhive:{controller,agent}-*` and `quay.io/yankeguo/ironhive:{controller,agent}-*`.
 

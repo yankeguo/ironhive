@@ -8,28 +8,28 @@ The controller is a plain JSON API: **std `net/http` only** — Go 1.22+ pattern
 
 | Path | Role |
 |---|---|
-| `cmd/ironhive-controller/` | Controller binary: flag `-config` / `IHC_CONFIG` (default `config.yml`) — every other setting lives in the config file; graceful shutdown |
-| `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers |
+| `cmd/ironhive-controller/` | Controller binary: flag `-config` (default `/etc/ironhive/controller.yml`) — every other setting lives in the config file; graceful shutdown |
+| `cmd/ironhive-agent/` | Agent binary: agent running inside managed containers; flag `-config` (default `/opt/ironhive/etc/agent.yml`) — every other setting lives in the config file |
 | `controller/` | Controller package: HTTP server, pod manager |
 | `controller/server.go` | `http.ServeMux` with method+path patterns, security headers, allocate/release endpoints, `/agent/` reverse proxy |
 | `controller/pods.go` | Pod manager: standby reconcile, list+watch in-memory state, allocate/release with cross-replica claims |
 | `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback; namespace resolution |
-| `controller/config.go` | `config.yml` loading: sections `http` (`listen`, default `:8080`), `kubernetes` (`kubeconfig`, `namespace`), and `pools.<name>` with `standby.static.count` (default 10) and `podTemplate` (`corev1.PodTemplateSpec`; the agent port is derived from its container ports) |
+| `controller/config.go` | Config file loading: sections `http` (`listen`, default `:8080`), `kubernetes` (`kubeconfig`, `namespace`), and `pools.<name>` with `standby.static.count` (default 10) and `podTemplate` (`corev1.PodTemplateSpec`; the agent port is derived from its container ports) |
 | `config.example.yml` | Example controller configuration with one `default` pool |
-| `agent.example.yml` | Example agent configuration (image-provided `/etc/ironhive/agent.yml`: `allowed_envs` shell env passthrough) |
+| `agent.example.yml` | Example agent configuration (image-provided `/opt/ironhive/etc/agent.yml`: `http.listen`, `allowed_envs` shell env passthrough) |
 | `manifest.yml` | Full demo deployment: RBAC (ServiceAccount + namespaced Role for pods, leader-election leases and events), ConfigMap with the controller config, 3-replica Deployment, Service |
 | `client.go`, `sandbox.go` | Root Go client package `ironhive`: controller endpoints (allocate/renew/release/pools) plus agent pass-through (file/tar/dir/shell) via the `Sandbox` handle |
 | `agent/` | Agent package: agent logic for managed containers, PID 1 zombie reaping |
 
 ## ironhive-controller
 
-`ironhive-controller` exposes the HTTP API and drives the managed containers through the Kubernetes API. The only command-line flag is `-config` / `IHC_CONFIG` (default `config.yml`) — every other setting lives in the config file.
+`ironhive-controller` exposes the HTTP API and drives the managed containers through the Kubernetes API. The only command-line flag is `-config` (default `/etc/ironhive/controller.yml`) — every other setting lives in the config file.
 
 The config file is organized in sections: `http.listen` (HTTP listen address, default `:8080`), `kubernetes.kubeconfig` (explicit kubeconfig path; unset resolves the standard loading rules with the in-cluster config as fallback) and `kubernetes.namespace` (where managed pods live; default is the in-cluster service-account namespace, else `default`), plus the container pools: `pools.<name>.standby.static.count` (warm pods kept ready, default 10) and `pools.<name>.podTemplate` (a full Kubernetes pod template, parsed as `corev1.PodTemplateSpec`). The agent's listen port inside the pod is derived from the template's container ports: the one named `http-ironhive` wins, else the first declared port, else the default 19173. See the annotated `config.example.yml` in the repo root. An absent config file is tolerated (defaults, no pools); a present-but-invalid one fails startup.
 
 Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
 
-For in-cluster operation, `manifest.yml` is a ready-to-apply demo scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete plus coordination.k8s.io leases and events (leader election), and the `RoleBinding` between them; a `ConfigMap` carrying the controller config; a 3-replica `Deployment` running `ghcr.io/yankeguo/ironhive:controller-latest` with `serviceAccountName: ironhive-controller` and the config mounted at `/etc/ironhive/config.yml`; and a `Service` exposing the API.
+For in-cluster operation, `manifest.yml` is a ready-to-apply demo scoped to the `ironhive` namespace: a `ServiceAccount`, a `Role` granting pod get/list/watch/create/update/patch/delete plus coordination.k8s.io leases and events (leader election), and the `RoleBinding` between them; a `ConfigMap` carrying the controller config; a 3-replica `Deployment` running `ghcr.io/yankeguo/ironhive:controller-latest` with `serviceAccountName: ironhive-controller` and the config mounted at `/etc/ironhive/controller.yml`; and a `Service` exposing the API.
 
 ### Pod manager
 
@@ -78,7 +78,7 @@ Controller-level calls (`Renew`, `Release`, `Pools`) exist on `Client` too; `San
 
 ## ironhive-agent
 
-`ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` (default `:19173`) — command line only, no environment variables.
+`ironhive-agent` is the agent running as the main process inside managed containers. Like the controller it takes exactly one flag — `-config` (default `/opt/ironhive/etc/agent.yml`), an optional image-provided YAML file carrying every other setting: `http.listen` (default `:19173`) and `allowed_envs` (see *Shell sessions*). An absent file means defaults; a present-but-invalid one fails startup. No environment variables anywhere — the agent is the sandbox's PID 1 and its process environment is visible to sandboxed commands.
 
 As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — and `Dockerfile.agent` (a minimal busybox image) ships no `ENTRYPOINT` at all: it is only used as an initContainer that copies the binary into a shared `emptyDir`, from which the sandbox's main container launches it (see `config.example.yml`). Shell PIDs are registered as owned by `exec.Cmd`; the SIGCHLD reaper validates that procfs belongs to its PID namespace, enumerates direct children, and calls targeted `wait4(pid)` only for adopted orphans, so it cannot steal a shell's exit status. If procfs is unavailable, the conservative fallback waits for arbitrary children only while no managed shell is active.
 
@@ -108,7 +108,7 @@ Endpoints that do not return data answer with a JSON envelope `{"message": ...}`
 `POST /agent/v1/shell` runs each command in a fresh bash — calls share nothing and run concurrently. The optional `cwd` field sets the working directory for that call only. The command's environment is assembled from two inputs:
 
 - the repeatable `env` field (`KEY=VALUE` entries), and
-- unless `strict_env=true`, a curated subset of the process environment — generic vars like `PATH` / `HOME` / `USER` / `LANG` / `LC_*` / `TERM` / `TZ` / `TMPDIR`, with platform-injected vars (Kubernetes `*_SERVICE_HOST` / `*_SERVICE_PORT`, credentials, pod metadata) deliberately dropped so sandboxed commands cannot observe their environment. An image can replace this list entirely via `/etc/ironhive/agent.yml`: set `allowed_envs` to a list of wildcard patterns (`*` / `?` / `[...]`), e.g. `[PATH, HOME, "APP_*", JAVA_OPTS]`; when the field (or the file) is absent, the curated defaults apply. With `strict_env=true` the command environment is exactly the `env` entries.
+- unless `strict_env=true`, a curated subset of the process environment — generic vars like `PATH` / `HOME` / `USER` / `LANG` / `LC_*` / `TERM` / `TZ` / `TMPDIR`, with platform-injected vars (Kubernetes `*_SERVICE_HOST` / `*_SERVICE_PORT`, credentials, pod metadata) deliberately dropped so sandboxed commands cannot observe their environment. An image can replace this list entirely via `/opt/ironhive/etc/agent.yml`: set `allowed_envs` to a list of wildcard patterns (`*` / `?` / `[...]`), e.g. `[PATH, HOME, "APP_*", JAVA_OPTS]`; when the field (or the file) is absent, the curated defaults apply. With `strict_env=true` the command environment is exactly the `env` entries.
 
 After the command exits, an EXIT trap snapshots its final pwd and environment, reported back as `cwd` / `env` events. The intended loop for the upstream harness: make the first call without `strict_env` and let the agent assemble a sane environment; read the reported `cwd` / `env`; then feed them back with `strict_env=true` on subsequent calls — from then on the session state is fully owned by the harness, with no dependence on the process environment.
 
@@ -149,7 +149,7 @@ The agent is deliberately low-level; the harness (timeouts, budget enforcement, 
 ## Develop
 
 ```bash
-go run ./cmd/ironhive-controller
+go run ./cmd/ironhive-controller -config config.example.yml
 ```
 
 ## Build

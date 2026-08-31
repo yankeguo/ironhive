@@ -31,26 +31,32 @@ pools:
       spec:
         # Boot an arbitrary user image under ironhive-agent: the init
         # container copies the agent binary from the agent image into a
-        # shared emptyDir, and the main container's command + args
-        # override the image's ENTRYPOINT and CMD with that copy — the
-        # agent becomes PID 1. The listen address is passed explicitly
-        # (the agent takes flags only, no environment variables);
-        # :19173 is the default anyway.
+        # shared emptyDir mounted at /opt/ironhive/bin, and the main
+        # container's command overrides the image's ENTRYPOINT and CMD
+        # with that copy — the agent becomes PID 1. /opt/ironhive is the
+        # implant's base directory: bin/ is runtime-injected (the
+        # emptyDir masks only it), etc/ stays in the image — an image
+        # bakes its agent config at /opt/ironhive/etc/agent.yml (see
+        # agent.example.yml). No args are needed while the defaults
+        # suffice (listen :19173).
         volumes:
           - name: ironhive-bin
             emptyDir: {}
         initContainers:
           - name: install-agent
             image: ghcr.io/yankeguo/ironhive:agent-latest
-            command: ["/bin/sh", "-c", "cp /ironhive-agent /.ironhive/bin/ironhive-agent"]
+            command: ["/bin/sh", "-c", "cp /ironhive-agent /opt/ironhive/bin/ironhive-agent"]
             volumeMounts:
               - name: ironhive-bin
-                mountPath: /.ironhive/bin
+                mountPath: /opt/ironhive/bin
         containers:
           - name: main
             image: python:3.14
-            command: ["/.ironhive/bin/ironhive-agent"]
-            args: ["-listen", ":19173"]
+            # Kubernetes replaces the image's ENTRYPOINT and CMD
+            # independently: setting command without args runs the agent
+            # with ZERO arguments — the image's CMD is dropped, not
+            # appended (unlike docker run --entrypoint). Both are ours.
+            command: ["/opt/ironhive/bin/ironhive-agent"]
             # The controller derives the agent's port from the template's
             # container ports: the one named http-ironhive wins, else the
             # first declared port, else the default 19173.
@@ -67,4 +73,4 @@ pools:
                 port: http-ironhive
             volumeMounts:
               - name: ironhive-bin
-                mountPath: /.ironhive/bin
+                mountPath: /opt/ironhive/bin

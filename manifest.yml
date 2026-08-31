@@ -5,7 +5,7 @@
 #   ServiceAccount — ironhive-controller; in-cluster pods authenticate as it
 #   Role/RoleBinding — pod get/list/watch/create/update/patch/delete plus
 #     coordination.k8s.io leases and events (leader election), nothing else
-#   ConfigMap      — the controller config (mounted at /etc/ironhive/config.yml)
+#   ConfigMap      — the controller config (mounted at /etc/ironhive/controller.yml)
 #   Deployment     — 3 controller replicas; reconcile is single-writer via
 #     leader election, allocate/renew/release run on every replica
 #   Service        — ClusterIP access to the controller HTTP API
@@ -63,7 +63,7 @@ data:
   # The controller resolves in-cluster credentials automatically, so no
   # kubernetes.kubeconfig is needed here. Structure mirrors the annotated
   # config.example.yml in the repo root.
-  config.yml: |
+  controller.yml: |
     http:
       listen: ":8080"
     kubernetes:
@@ -81,15 +81,14 @@ data:
             initContainers:
               - name: install-agent
                 image: ghcr.io/yankeguo/ironhive:agent-latest
-                command: ["/bin/sh", "-c", "cp /ironhive-agent /.ironhive/bin/ironhive-agent"]
+                command: ["/bin/sh", "-c", "cp /ironhive-agent /opt/ironhive/bin/ironhive-agent"]
                 volumeMounts:
                   - name: ironhive-bin
-                    mountPath: /.ironhive/bin
+                    mountPath: /opt/ironhive/bin
             containers:
               - name: main
                 image: python:3.14
-                command: ["/.ironhive/bin/ironhive-agent"]
-                args: ["-listen", ":19173"]
+                command: ["/opt/ironhive/bin/ironhive-agent"]
                 ports:
                   - name: http-ironhive
                     containerPort: 19173
@@ -99,7 +98,7 @@ data:
                     port: http-ironhive
                 volumeMounts:
                   - name: ironhive-bin
-                    mountPath: /.ironhive/bin
+                    mountPath: /opt/ironhive/bin
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -122,10 +121,9 @@ spec:
       containers:
         - name: controller
           image: ghcr.io/yankeguo/ironhive:controller-latest
-          # The image's ENTRYPOINT is tini; keep it by leaving command
-          # unset and putting the controller binary first in args (K8s
-          # args append after the entrypoint).
-          args: ["/ironhive-controller", "-config", "/etc/ironhive/config.yml"]
+          # Neither command nor args: the image defaults are exactly
+          # right — ENTRYPOINT tini + CMD /ironhive-controller, and the
+          # default -config path is where the ConfigMap below is mounted.
           ports:
             - name: http
               containerPort: 8080

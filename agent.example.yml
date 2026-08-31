@@ -1,7 +1,15 @@
 # ironhive agent configuration — an optional file baked into the sandbox
-# image at /etc/ironhive/agent.yml, customizing the injected agent's
-# behavior. A missing file, or a missing field, falls back to the built-in
-# defaults.
+# image at /opt/ironhive/etc/agent.yml (override the path with the
+# -config flag), customizing the injected agent's behavior. A missing
+# file, or a missing field, falls back to the built-in defaults.
+
+# http — the agent's own HTTP server.
+http:
+  # listen — HTTP listen address (default :19173). Keep it in sync with
+  # the pod template's container ports: the controller derives the
+  # agent's port from them (the port named http-ironhive wins, else the
+  # first declared port, else 19173).
+  listen: ":19173"
 
 # allowed_envs — process environment variables passed through to shell
 # commands (POST /agent/v1/shell without strict_env=true), as wildcard
