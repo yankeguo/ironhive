@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,9 +23,14 @@ const shellSSEMaxLine = 16 * 1024 * 1024
 // the X-Sandbox-ID header.
 type Sandbox struct {
 	client *Client
+	// mu guards LeaseExpires: Renew may write it while another goroutine
+	// reads it via LeaseDeadline.
+	mu sync.Mutex
 	// Name is the pod name, as returned by Allocate.
 	Name string
 	// LeaseExpires is the current lease deadline; Renew keeps it current.
+	// Direct reads race with a concurrently running Renew — use
+	// LeaseDeadline() for those instead.
 	LeaseExpires time.Time
 }
 
@@ -44,8 +50,19 @@ func (s *Sandbox) Renew(ctx context.Context, lease time.Duration) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.LeaseExpires = expires
+	s.mu.Unlock()
 	return nil
+}
+
+// LeaseDeadline returns the current lease deadline. Unlike reading
+// LeaseExpires directly, it is safe to call while Renew runs concurrently
+// (e.g. from a background renewer goroutine).
+func (s *Sandbox) LeaseDeadline() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LeaseExpires
 }
 
 // Release destroys the sandbox. Always call it when done — the lease
