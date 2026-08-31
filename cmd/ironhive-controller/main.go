@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	config := envOr("IHC_CONFIG", "config.yml")
-	flag.StringVar(&config, "config", config, "config file path")
+	var config string
+	flag.StringVar(&config, "config", controller.DefaultConfigPath, "config file path")
 	flag.Parse()
 
 	// The config file carries every setting except its own path: absent
@@ -90,11 +90,4 @@ func main() {
 		log.Println("shutdown:", err)
 		os.Exit(1)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

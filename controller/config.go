@@ -15,12 +15,16 @@ const (
 	DefaultStandbyStaticCount = 10
 	DefaultAgentPort          = 19173
 	DefaultListen             = ":8080"
+	// DefaultConfigPath is where the controller looks for its config file
+	// when -config is not given; the conventional mount location for a
+	// ConfigMap carrying one.
+	DefaultConfigPath = "/etc/ironhive/controller.yml"
 	// AgentPortName is the container port name that marks the agent's
 	// listen port in a pool's pod template.
 	AgentPortName = "http-ironhive"
 )
 
-// Config is the controller's config.yml: an `http` section, a
+// Config is the controller's config file: an `http` section, a
 // `kubernetes` section, and the container `pools`.
 type Config struct {
 	// HTTP configures the controller's own HTTP server.

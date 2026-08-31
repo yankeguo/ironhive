@@ -24,7 +24,7 @@ type Server struct {
 	// Kubernetes is the client for the cluster hosting the managed
 	// containers; nil when no credentials were resolvable at startup.
 	Kubernetes kubernetes.Interface
-	// Config is the loaded config.yml, or the default config when no
+	// Config is the loaded config file, or the default config when no
 	// config file was found; never nil.
 	Config *Config
 	// Pods tracks the managed pods and hands them out; nil when the pod
