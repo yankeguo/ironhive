@@ -78,13 +78,17 @@ data:
             volumes:
               - name: ironhive-bin
                 emptyDir: {}
+              - name: ironhive-etc
+                emptyDir: {}
             initContainers:
               - name: install-agent
                 image: ghcr.io/yankeguo/ironhive:agent-latest
-                command: ["/bin/sh", "-c", "cp /ironhive-agent /opt/ironhive/bin/ironhive-agent"]
+                command: ["/bin/sh", "-c", "cp /ironhive-agent /opt/ironhive/bin/ironhive-agent && touch /opt/ironhive/etc/agent.yml"]
                 volumeMounts:
                   - name: ironhive-bin
                     mountPath: /opt/ironhive/bin
+                  - name: ironhive-etc
+                    mountPath: /opt/ironhive/etc
             containers:
               - name: main
                 image: python:3.14
@@ -99,6 +103,8 @@ data:
                 volumeMounts:
                   - name: ironhive-bin
                     mountPath: /opt/ironhive/bin
+                  - name: ironhive-etc
+                    mountPath: /opt/ironhive/etc
 ---
 apiVersion: apps/v1
 kind: Deployment

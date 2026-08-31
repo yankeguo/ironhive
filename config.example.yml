@@ -34,21 +34,30 @@ pools:
         # shared emptyDir mounted at /opt/ironhive/bin, and the main
         # container's command overrides the image's ENTRYPOINT and CMD
         # with that copy — the agent becomes PID 1. /opt/ironhive is the
-        # implant's base directory: bin/ is runtime-injected (the
-        # emptyDir masks only it), etc/ stays in the image — an image
-        # bakes its agent config at /opt/ironhive/etc/agent.yml (see
-        # agent.example.yml). No args are needed while the defaults
-        # suffice (listen :19173).
+        # implant's base directory. No args are needed while the
+        # defaults suffice (listen :19173).
+        #
+        # The etc/ emptyDir below completes the layout for images that
+        # bake NO config: the init container touches an empty agent.yml
+        # (an empty file is valid YAML and parses to defaults). An image
+        # that bakes its own /opt/ironhive/etc/agent.yml (see
+        # agent.example.yml) must DROP the ironhive-etc volume, both
+        # mounts, and the touch — the emptyDir would mask the baked
+        # file.
         volumes:
           - name: ironhive-bin
+            emptyDir: {}
+          - name: ironhive-etc
             emptyDir: {}
         initContainers:
           - name: install-agent
             image: ghcr.io/yankeguo/ironhive:agent-latest
-            command: ["/bin/sh", "-c", "cp /ironhive-agent /opt/ironhive/bin/ironhive-agent"]
+            command: ["/bin/sh", "-c", "cp /ironhive-agent /opt/ironhive/bin/ironhive-agent && touch /opt/ironhive/etc/agent.yml"]
             volumeMounts:
               - name: ironhive-bin
                 mountPath: /opt/ironhive/bin
+              - name: ironhive-etc
+                mountPath: /opt/ironhive/etc
         containers:
           - name: main
             image: python:3.14
@@ -74,3 +83,5 @@ pools:
             volumeMounts:
               - name: ironhive-bin
                 mountPath: /opt/ironhive/bin
+              - name: ironhive-etc
+                mountPath: /opt/ironhive/etc
