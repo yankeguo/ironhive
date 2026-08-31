@@ -37,7 +37,8 @@ var (
 // serialized by the API server through resourceVersion preconditions.
 //
 // It returns when ctx is cancelled, releasing the lease for a fast
-// failover.
+// failover. Losing leadership only ends one election term — the loop
+// below rejoins so this replica can lead again.
 func (m *PodManager) RunLeaderElection(ctx context.Context) {
 	// Joining the election before the first list can make a restarting
 	// controller reconcile an empty cache and duplicate the whole pool.
@@ -77,27 +78,35 @@ func (m *PodManager) RunLeaderElection(ctx context.Context) {
 		},
 	}
 
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:          lock,
-		LeaseDuration: leaderLeaseDuration,
-		RenewDeadline: leaderRenewDeadline,
-		RetryPeriod:   leaderRetryPeriod,
-		// Give the lease up on graceful shutdown so the next leader
-		// starts reconciling immediately instead of after expiry.
-		ReleaseOnCancel: true,
-		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(ctx context.Context) {
-				log.Println("pod manager: leading as", id)
-				m.RunReconcile(ctx)
+	// RunOrDie returns for good once renewal has failed past
+	// RenewDeadline — leadership loss ends the whole election, not just
+	// the term. Rejoin so this replica reconciles again later; that is
+	// safe because every reconcile pass starts from an authoritative
+	// List and the initial-list gate is still satisfied by the running
+	// watch.
+	for ctx.Err() == nil {
+		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+			Lock:          lock,
+			LeaseDuration: leaderLeaseDuration,
+			RenewDeadline: leaderRenewDeadline,
+			RetryPeriod:   leaderRetryPeriod,
+			// Give the lease up on graceful shutdown so the next leader
+			// starts reconciling immediately instead of after expiry.
+			ReleaseOnCancel: true,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(ctx context.Context) {
+					log.Println("pod manager: leading as", id)
+					m.RunReconcile(ctx)
+				},
+				OnStoppedLeading: func() {
+					log.Println("pod manager:", id, "lost leadership")
+				},
+				OnNewLeader: func(identity string) {
+					if identity != id {
+						log.Println("pod manager: leader is", identity)
+					}
+				},
 			},
-			OnStoppedLeading: func() {
-				log.Println("pod manager:", id, "lost leadership")
-			},
-			OnNewLeader: func(identity string) {
-				if identity != id {
-					log.Println("pod manager: leader is", identity)
-				}
-			},
-		},
-	})
+		})
+	}
 }

@@ -80,7 +80,9 @@ func (p PoolConfig) AgentPort() int32 {
 	var first int32
 	for _, c := range p.PodTemplate.Spec.Containers {
 		for _, cp := range c.Ports {
-			if cp.Name == AgentPortName {
+			// A named port without containerPort parses as 0; treat it
+			// as undeclared so the fallback chain still applies.
+			if cp.Name == AgentPortName && cp.ContainerPort != 0 {
 				return cp.ContainerPort
 			}
 			if first == 0 {

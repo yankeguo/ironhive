@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -242,10 +243,31 @@ func (m *PodManager) applyEvent(ev watch.Event) {
 	defer m.mu.Unlock()
 	switch ev.Type {
 	case watch.Added, watch.Modified:
+		// Across the list→watch handoff (or a refreshPod Get racing a
+		// patch) an event older than an in-flight claim/renew can land
+		// late; never let it rewind newer state.
+		if cur, ok := m.pods[pod.Name]; ok && staleResourceVersion(pod.ResourceVersion, cur.ResourceVersion) {
+			return
+		}
 		m.pods[pod.Name] = podStateFrom(pod)
 	case watch.Deleted:
 		delete(m.pods, pod.Name)
 	}
+}
+
+// staleResourceVersion reports whether incoming is not newer than current.
+// Kubernetes resourceVersions are integer strings; an unparseable value
+// cannot be ordered, so it is treated as newer and the event is applied.
+func staleResourceVersion(incoming, current string) bool {
+	inc, err := strconv.ParseInt(incoming, 10, 64)
+	if err != nil {
+		return false
+	}
+	cur, err := strconv.ParseInt(current, 10, 64)
+	if err != nil {
+		return false
+	}
+	return inc <= cur
 }
 
 type sweepTarget struct {
@@ -621,7 +643,14 @@ func (m *PodManager) patchPod(ctx context.Context, name, patch string) (PodState
 // returns the refreshed state.
 func (m *PodManager) Renew(ctx context.Context, name string, lease time.Duration) (PodState, error) {
 	m.mu.RLock()
-	st, ok := m.pods[name]
+	p, ok := m.pods[name]
+	// Read a copy taken under the lock, like Lookup does — entries are
+	// replaced wholesale, so dereferencing the pointer after RUnlock
+	// would race a replace.
+	var st PodState
+	if ok {
+		st = *p
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
@@ -640,7 +669,12 @@ func (m *PodManager) Renew(ctx context.Context, name string, lease time.Duration
 // topped up with a fresh pod by the next reconcile pass.
 func (m *PodManager) Release(ctx context.Context, name string) error {
 	m.mu.RLock()
-	st, ok := m.pods[name]
+	p, ok := m.pods[name]
+	// Copy under the lock, same as Renew above.
+	var st PodState
+	if ok {
+		st = *p
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrSandboxNotFound, name)

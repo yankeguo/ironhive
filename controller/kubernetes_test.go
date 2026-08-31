@@ -53,3 +53,18 @@ func TestNewKubernetesClientBadKubeconfig(t *testing.T) {
 		t.Fatalf("error %q should name the kubeconfig path", err)
 	}
 }
+
+func TestNewKubernetesClientInClusterFallback(t *testing.T) {
+	// No kubeconfig anywhere — KUBECONFIG points nowhere and HOME has no
+	// .kube/config — so the in-cluster fallback must be attempted; outside
+	// a pod it fails with the combined message.
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("HOME", t.TempDir())
+	_, _, err := NewKubernetesClient("")
+	if err == nil {
+		t.Fatal("want error outside a pod")
+	}
+	if !strings.Contains(err.Error(), "no kubeconfig found and in-cluster config unavailable") {
+		t.Fatalf("err = %q, want the in-cluster fallback message", err)
+	}
+}

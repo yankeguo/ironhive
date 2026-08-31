@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -64,9 +63,11 @@ func kubeRESTConfig(kubeconfig string) (*rest.Config, string, error) {
 	switch {
 	case err == nil:
 		return config, "default kubeconfig", nil
-	case errors.Is(err, clientcmd.ErrEmptyConfig):
+	case clientcmd.IsEmptyConfig(err):
 		// No kubeconfig anywhere: assume we run inside a pod and fall
-		// back to the mounted service account.
+		// back to the mounted service account. IsEmptyConfig is the
+		// sanctioned check — errors.Is never matches here because the
+		// loader's "no configuration" error is a slice without Unwrap.
 		config, err := rest.InClusterConfig()
 		if err != nil {
 			return nil, "", fmt.Errorf("no kubeconfig found and in-cluster config unavailable: %w", err)

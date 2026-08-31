@@ -125,6 +125,48 @@ pools:
 	if got := cfg.Pools["x"].AgentPort(); got != 8080 {
 		t.Fatalf("AgentPort() = %d, want 8080", got)
 	}
+
+	// A named http-ironhive port without containerPort parses as 0 and
+	// must not win — the first declared port applies instead.
+	p = writeConfig(t, `
+pools:
+  x:
+    podTemplate:
+      spec:
+        containers:
+          - name: agent
+            image: agent:dev
+            ports:
+              - name: http-ironhive
+              - containerPort: 8080
+`)
+	cfg, err = LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Pools["x"].AgentPort(); got != 8080 {
+		t.Fatalf("AgentPort() with zero named port = %d, want 8080", got)
+	}
+
+	// With no other declared port, the default applies.
+	p = writeConfig(t, `
+pools:
+  x:
+    podTemplate:
+      spec:
+        containers:
+          - name: agent
+            image: agent:dev
+            ports:
+              - name: http-ironhive
+`)
+	cfg, err = LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Pools["x"].AgentPort(); got != DefaultAgentPort {
+		t.Fatalf("AgentPort() with only a zero named port = %d, want %d", got, DefaultAgentPort)
+	}
 }
 
 func TestLoadConfigErrors(t *testing.T) {

@@ -2,13 +2,18 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 // shrinkLeaderTimings makes the election fast enough for tests.
@@ -55,6 +60,64 @@ func TestLeaderElectionReconciles(t *testing.T) {
 	}
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
 		t.Error("lease has no holder identity")
+	}
+}
+
+func TestLeaderElectionRejoinsAfterLoss(t *testing.T) {
+	shrinkLeaderTimings(t)
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The reactor must be registered before the clientset is in use; the
+	// atomic flag arms it later, once the first term is established.
+	var fail atomic.Bool
+	kube.Fake.PrependReactor("update", "leases", func(ktesting.Action) (bool, runtime.Object, error) {
+		if fail.Load() {
+			return true, nil, apierrors.NewInternalError(errors.New("injected renewal failure"))
+		}
+		return false, nil, nil
+	})
+
+	go m.Run(ctx)
+	go m.RunLeaderElection(ctx)
+
+	// Wait for the first leadership term.
+	deadline := time.Now().Add(5 * time.Second)
+	var first *coordinationv1.Lease
+	for {
+		lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+		if err == nil && lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" &&
+			lease.Spec.RenewTime != nil {
+			first = lease
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica did not acquire leadership")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Make every lease update fail; renewal failing past RenewDeadline
+	// ends the election run entirely.
+	fail.Store(true)
+	time.Sleep(time.Second)
+	fail.Store(false)
+
+	// The election loop must rejoin: renewals eventually advance RenewTime
+	// well past the first term's last one.
+	deadline = time.Now().Add(5 * time.Second)
+	threshold := first.Spec.RenewTime.Time.Add(900 * time.Millisecond)
+	for {
+		lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+		if err == nil && lease.Spec.RenewTime != nil && lease.Spec.RenewTime.Time.After(threshold) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica did not rejoin the election after losing leadership")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

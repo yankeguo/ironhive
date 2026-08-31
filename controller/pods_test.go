@@ -190,6 +190,35 @@ func TestApplyEventUpdatesState(t *testing.T) {
 	}
 }
 
+func TestApplyEventSkipsStaleResourceVersion(t *testing.T) {
+	m := NewPodManager(fake.NewSimpleClientset(), "ironhive", testPoolConfig(0))
+
+	base := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "sandbox-a",
+		Namespace: "ironhive",
+		Labels:    map[string]string{LabelPool: "default"},
+	}}
+	newer := base.DeepCopy()
+	newer.ResourceVersion = "10"
+	newer.Status.PodIP = "10.0.0.10"
+	m.applyEvent(watch.Event{Type: watch.Added, Object: newer})
+
+	// An event older than the cached entry — e.g. a late list→watch
+	// handoff delivery — must not rewind the newer state.
+	older := base.DeepCopy()
+	older.ResourceVersion = "9"
+	older.Status.PodIP = "10.0.0.9"
+	m.applyEvent(watch.Event{Type: watch.Modified, Object: older})
+
+	st, ok := m.Lookup("sandbox-a")
+	if !ok {
+		t.Fatal("pod missing from state")
+	}
+	if st.ResourceVersion != "10" || st.IP != "10.0.0.10" {
+		t.Fatalf("stale event rewound state to %+v", st)
+	}
+}
+
 func TestWatchReturnsOnErrorEvent(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	fw := watch.NewFake()
