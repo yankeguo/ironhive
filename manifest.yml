@@ -62,7 +62,7 @@ metadata:
 data:
   # The controller resolves in-cluster credentials automatically, so no
   # kubernetes.kubeconfig is needed here. Structure mirrors the annotated
-  # config.yml in the repo root.
+  # config.example.yml in the repo root.
   config.yml: |
     http:
       listen: ":8080"

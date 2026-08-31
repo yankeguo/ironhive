@@ -63,7 +63,8 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 
 ## Deploy references
 
-- `config.yml` — annotated example pool config (`standby.static.count`, `podTemplate`; agent port derived from `podTemplate` container ports — `http-ironhive` wins, else the first, else 19173).
+- `config.example.yml` — annotated example pool config (`standby.static.count`, `podTemplate`; agent port derived from `podTemplate` container ports — `http-ironhive` wins, else the first, else 19173).
+- `agent.example.yml` — annotated example agent config (image-provided `/etc/ironhive/agent.yml`; `allowed_envs` wildcard patterns fully replace the built-in shell env allowlist, absent file/field falls back to defaults).
 - `manifest.yml` — full demo deployment in namespace `ironhive`: namespaced Role for the controller (pods get/list/watch/create/update/patch/delete, coordination.k8s.io leases, and events), ConfigMap with the controller config, 3-replica Deployment, Service.
 - `Dockerfile.controller` / `Dockerfile.agent` — multi-stage builds; images published as `ghcr.io/yankeguo/ironhive:{controller,agent}-*` and `quay.io/yankeguo/ironhive:{controller,agent}-*`.
 

@@ -1,0 +1,16 @@
+# ironhive agent configuration — an optional file baked into the sandbox
+# image at /etc/ironhive/agent.yml, customizing the injected agent's
+# behavior. A missing file, or a missing field, falls back to the built-in
+# defaults.
+
+# allowed_envs — process environment variables passed through to shell
+# commands (POST /agent/v1/shell without strict_env=true), as wildcard
+# patterns (`*`, `?`, `[...]`; path.Match semantics). This is a FULL
+# replacement for the built-in allowlist — PATH, HOME, USER, LOGNAME,
+# SHELL, LANG, TERM, TZ, TMPDIR and LC_* — so repeat any defaults you
+# still want. An explicit empty list passes nothing through.
+allowed_envs:
+  - PATH
+  - HOME
+  - "APP_*"
+  - JAVA_OPTS

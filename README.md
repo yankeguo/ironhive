@@ -20,7 +20,8 @@ The controller's web UI is retro on the server, modern in the build:
 | `controller/pods.go` | Pod manager: standby reconcile, list+watch in-memory state, allocate/release with cross-replica claims |
 | `controller/kubernetes.go` | Kubernetes clientset: explicit kubeconfig → default loading rules → in-cluster fallback; namespace resolution |
 | `controller/config.go` | `config.yml` loading: sections `http` (`listen`, default `:8080`), `kubernetes` (`kubeconfig`, `namespace`), and `pools.<name>` with `standby.static.count` (default 10) and `podTemplate` (`corev1.PodTemplateSpec`; the agent port is derived from its container ports) |
-| `config.yml` | Example controller configuration with one `default` pool |
+| `config.example.yml` | Example controller configuration with one `default` pool |
+| `agent.example.yml` | Example agent configuration (image-provided `/etc/ironhive/agent.yml`: `allowed_envs` shell env passthrough) |
 | `manifest.yml` | Full demo deployment: RBAC (ServiceAccount + namespaced Role for pods, leader-election leases and events), ConfigMap with the controller config, 3-replica Deployment, Service |
 | `controller/web_tmpl.go` | `//go:embed web/view/*.html`, template funcs `jsAsset` / `cssAsset` |
 | `controller/web_static.go` | `//go:embed all:web/dist`, `<entry>-<hash>.<ext>` matching, `/static/` handler |
@@ -34,7 +35,7 @@ The controller's web UI is retro on the server, modern in the build:
 
 `ironhive-controller` serves the web UI and drives the managed containers through the Kubernetes API. The only command-line flag is `-config` / `IHC_CONFIG` (default `config.yml`) — every other setting lives in the config file.
 
-The config file is organized in sections: `http.listen` (HTTP listen address, default `:8080`), `kubernetes.kubeconfig` (explicit kubeconfig path; unset resolves the standard loading rules with the in-cluster config as fallback) and `kubernetes.namespace` (where managed pods live; default is the in-cluster service-account namespace, else `default`), plus the container pools: `pools.<name>.standby.static.count` (warm pods kept ready, default 10) and `pools.<name>.podTemplate` (a full Kubernetes pod template, parsed as `corev1.PodTemplateSpec`). The agent's listen port inside the pod is derived from the template's container ports: the one named `http-ironhive` wins, else the first declared port, else the default 19173. See the annotated `config.yml` in the repo root. An absent config file is tolerated (defaults, no pools); a present-but-invalid one fails startup.
+The config file is organized in sections: `http.listen` (HTTP listen address, default `:8080`), `kubernetes.kubeconfig` (explicit kubeconfig path; unset resolves the standard loading rules with the in-cluster config as fallback) and `kubernetes.namespace` (where managed pods live; default is the in-cluster service-account namespace, else `default`), plus the container pools: `pools.<name>.standby.static.count` (warm pods kept ready, default 10) and `pools.<name>.podTemplate` (a full Kubernetes pod template, parsed as `corev1.PodTemplateSpec`). The agent's listen port inside the pod is derived from the template's container ports: the one named `http-ironhive` wins, else the first declared port, else the default 19173. See the annotated `config.example.yml` in the repo root. An absent config file is tolerated (defaults, no pools); a present-but-invalid one fails startup.
 
 Kubernetes credentials resolve in order: an explicit kubeconfig path, the default loading rules (`$KUBECONFIG`, then `~/.kube/config`), and the **in-cluster** service-account config as the fallback — inside a pod no configuration is needed at all. A malformed explicit kubeconfig fails hard rather than silently falling back. If no credentials resolve at startup the UI still serves and the failure is logged.
 
@@ -51,7 +52,7 @@ The pod manager (`controller/pods.go`) keeps each pool's standby pods warm and t
 - **Allocation state lives on the pod object** as the `ironhive.dev/allocated` and `ironhive.dev/lease-expires` annotations. Claiming is a merge patch carrying the pod's `resourceVersion` as an optimistic-concurrency precondition, so racing controller replicas cannot claim the same pod — the API server accepts exactly one. No leader election; state survives controller restarts and is shared by all replicas through the watch.
 - Every allocation carries a **lease**: the caller declares a duration at allocate time and extends it with `renew`; the next periodic reconcile after the deadline (normally within 30 seconds) destroys the pod, so a crashed caller can never leak a sandbox forever.
 - Sandboxes are **single-use**: releasing (or lease expiry) destroys the pod and reconcile tops the pool up with a fresh one.
-- Pod readiness is whatever the template declares: the example `config.yml` gates Ready on the agent's `/healthz` via a `readinessProbe`. Allocation additionally rejects terminating pods and pods left from an older template.
+- Pod readiness is whatever the template declares: the example `config.example.yml` gates Ready on the agent's `/healthz` via a `readinessProbe`. Allocation additionally rejects terminating pods and pods left from an older template.
 
 ### API
 
@@ -93,7 +94,7 @@ Controller-level calls (`Renew`, `Release`, `Pools`) exist on `Client` too; `San
 
 `ironhive-agent` is the agent running as the main process inside managed containers. Flags: `-listen` (default `:19173`) — command line only, no environment variables.
 
-As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — and `Dockerfile.agent` (a minimal busybox image) ships no `ENTRYPOINT` at all: it is only used as an initContainer that copies the binary into a shared `emptyDir`, from which the sandbox's main container launches it (see `config.yml`). Shell PIDs are registered as owned by `exec.Cmd`; the SIGCHLD reaper validates that procfs belongs to its PID namespace, enumerates direct children, and calls targeted `wait4(pid)` only for adopted orphans, so it cannot steal a shell's exit status. If procfs is unavailable, the conservative fallback waits for arbitrary children only while no managed shell is active.
+As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — and `Dockerfile.agent` (a minimal busybox image) ships no `ENTRYPOINT` at all: it is only used as an initContainer that copies the binary into a shared `emptyDir`, from which the sandbox's main container launches it (see `config.example.yml`). Shell PIDs are registered as owned by `exec.Cmd`; the SIGCHLD reaper validates that procfs belongs to its PID namespace, enumerates direct children, and calls targeted `wait4(pid)` only for adopted orphans, so it cannot steal a shell's exit status. If procfs is unavailable, the conservative fallback waits for arbitrary children only while no managed shell is active.
 
 ### API
 

@@ -8,5 +8,5 @@ FROM busybox:latest
 COPY --from=builder /ironhive-agent /ironhive-agent
 # This image is not meant to run a workload itself: it is used as an
 # initContainer that copies /ironhive-agent into a shared emptyDir (see
-# config.yml), so it intentionally has no ENTRYPOINT — only the static
+# config.example.yml), so it intentionally has no ENTRYPOINT — only the static
 # binary and busybox's shell for the copy command.
