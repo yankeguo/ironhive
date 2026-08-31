@@ -31,7 +31,7 @@ func postShell(t *testing.T, form url.Values) (int, []capturedEvent) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/shell", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	ShellPostHandler().ServeHTTP(rec, req)
+	ShellPostHandler(NewConfig()).ServeHTTP(rec, req)
 	return rec.Code, parseSSE(t, rec.Body.String())
 }
 
@@ -98,7 +98,7 @@ func TestShellContentType(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/shell", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	ShellPostHandler().ServeHTTP(rec, req)
+	ShellPostHandler(NewConfig()).ServeHTTP(rec, req)
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Fatalf("Content-Type = %q", ct)
 	}
@@ -236,7 +236,7 @@ func TestCuratedEnv(t *testing.T) {
 		"AWS_SECRET_ACCESS_KEY=secret",
 		"HOSTNAME=pod-abc123",
 	}
-	got := curatedEnv(base)
+	got := curatedEnv(base, nil, false)
 	want := []string{"PATH=/usr/bin", "HOME=/root", "LC_ALL=C.UTF-8"}
 	if len(got) != len(want) {
 		t.Fatalf("curatedEnv = %v, want %v", got, want)
@@ -244,47 +244,6 @@ func TestCuratedEnv(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("curatedEnv = %v, want %v", got, want)
-		}
-	}
-}
-
-func TestLoadEnvPatterns(t *testing.T) {
-	write := func(content string) string {
-		path := filepath.Join(t.TempDir(), "agent.yml")
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-
-	// A missing file, a file without the field, and an unparsable file all
-	// mean no override: the built-in allowlist applies.
-	for _, path := range []string{
-		filepath.Join(t.TempDir(), "nope"),
-		write("other_field: true\n"),
-		write("allowed_envs: [unclosed\n"),
-	} {
-		if _, override := loadEnvPatterns(path); override {
-			t.Fatalf("loadEnvPatterns(%q) override = true, want false", path)
-		}
-	}
-
-	// An explicitly empty list is an override too: nothing passes through.
-	patterns, override := loadEnvPatterns(write("allowed_envs: []\n"))
-	if !override || len(patterns) != 0 {
-		t.Fatalf("loadEnvPatterns(empty) = %v, %v, want [], true", patterns, override)
-	}
-
-	// Comments, quoted entries and invalid patterns (ignored with a log).
-	patterns, override = loadEnvPatterns(write(
-		"# image-specific vars\nallowed_envs:\n  - APP_*\n  - 'JAVA_OPTS'\n  - '[BAD'\n  - '?'\n"))
-	want := []string{"APP_*", "JAVA_OPTS", "?"}
-	if !override || len(patterns) != len(want) {
-		t.Fatalf("loadEnvPatterns = %v, %v, want %v, true", patterns, override, want)
-	}
-	for i := range want {
-		if patterns[i] != want[i] {
-			t.Fatalf("loadEnvPatterns = %v, want %v", patterns, want)
 		}
 	}
 }
@@ -324,7 +283,7 @@ func TestShellParallel(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/v1/shell", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		rec := httptest.NewRecorder()
-		ShellPostHandler().ServeHTTP(rec, req)
+		ShellPostHandler(NewConfig()).ServeHTTP(rec, req)
 		return rec.Code
 	}
 	start := time.Now()
@@ -357,7 +316,7 @@ func TestShellQueryParams(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost,
 		"/v1/shell?command="+url.QueryEscape("echo hi"), nil)
 	rec := httptest.NewRecorder()
-	ShellPostHandler().ServeHTTP(rec, req)
+	ShellPostHandler(NewConfig()).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -380,7 +339,7 @@ func TestShellBadParams(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/shell", strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			rec := httptest.NewRecorder()
-			ShellPostHandler().ServeHTTP(rec, req)
+			ShellPostHandler(NewConfig()).ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400", rec.Code)
 			}
@@ -396,7 +355,7 @@ func TestShellCancelTerminatesCommand(t *testing.T) {
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		ShellPostHandler().ServeHTTP(rec, req)
+		ShellPostHandler(NewConfig()).ServeHTTP(rec, req)
 		close(done)
 	}()
 	// Let the command start, then cancel the request; the handler should

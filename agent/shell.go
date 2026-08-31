@@ -18,8 +18,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"sigs.k8s.io/yaml"
 )
 
 // envAllowlist is the default set of process environment variables
@@ -28,7 +26,7 @@ import (
 // `*_SERVICE_HOST` / `*_SERVICE_PORT`, cloud credentials, pod metadata,
 // ...) are dropped so sandboxed commands cannot observe their environment.
 // LC_* locale vars are kept by prefix. An image can replace this list
-// entirely via agentConfigFile, see envAllowed.
+// entirely via the config file's allowed_envs field, see envAllowed.
 var envAllowlist = map[string]bool{
 	"PATH":    true,
 	"HOME":    true,
@@ -39,62 +37,6 @@ var envAllowlist = map[string]bool{
 	"TERM":    true,
 	"TZ":      true,
 	"TMPDIR":  true,
-}
-
-// agentConfigFile is an optional image-provided YAML config customizing
-// the injected agent's behavior. It lets an image decide which of its own
-// vars (e.g. APP_HOME, JAVA_OPTS) reach sandboxed commands without an
-// agent rebuild.
-const agentConfigFile = "/etc/ironhive/agent.yml"
-
-// agentConfig mirrors agentConfigFile. AllowedEnvs is a pointer so a
-// missing field (fall back to envAllowlist) is distinguishable from an
-// explicitly empty list (pass nothing through).
-type agentConfig struct {
-	// allowed_envs — full replacement for envAllowlist: wildcard patterns
-	// (`*` / `?` / `[...]` as in path.Match) naming the process
-	// environment variables shell commands may inherit when strict_env is
-	// false.
-	AllowedEnvs *[]string `json:"allowed_envs"`
-}
-
-// configuredEnvPatterns lazily loads agentConfigFile once. The file is
-// part of the image, so it cannot change under a running agent. The bool
-// reports whether allowed_envs was set and envAllowlist is replaced.
-var configuredEnvPatterns = sync.OnceValues(func() ([]string, bool) {
-	patterns, override := loadEnvPatterns(agentConfigFile)
-	if override {
-		log.Printf("agent: env allowlist replaced by %d patterns from %s", len(patterns), agentConfigFile)
-	}
-	return patterns, override
-})
-
-// loadEnvPatterns parses the allowed_envs field of an agent config file.
-// A missing, unreadable, or unparsable file, or a missing field, means no
-// override: the caller falls back to the built-in allowlist.
-func loadEnvPatterns(path string) (patterns []string, override bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
-	}
-	var cfg agentConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Printf("agent: ignoring unparsable config file %s: %v", path, err)
-		return nil, false
-	}
-	if cfg.AllowedEnvs == nil {
-		return nil, false
-	}
-	for _, p := range *cfg.AllowedEnvs {
-		// Validate eagerly so a typo surfaces in the log instead of
-		// silently never matching.
-		if _, err := pathpkg.Match(p, ""); err != nil {
-			log.Printf("agent: ignoring invalid env pattern %q in %s: %v", p, path, err)
-			continue
-		}
-		patterns = append(patterns, p)
-	}
-	return patterns, true
 }
 
 // envAllowed reports whether the process environment variable key may be
@@ -114,9 +56,8 @@ func envAllowed(key string, patterns []string, override bool) bool {
 }
 
 // curatedEnv filters base down to the allowlisted generic vars, or to the
-// configured patterns when agentConfigFile replaces the allowlist.
-func curatedEnv(base []string) []string {
-	patterns, override := configuredEnvPatterns()
+// configured patterns when the config file replaces the allowlist.
+func curatedEnv(base, patterns []string, override bool) []string {
 	var out []string
 	for _, e := range base {
 		k, _, _ := strings.Cut(e, "=")
@@ -184,7 +125,11 @@ func shellQuote(s string) string {
 // If the client disconnects, the command's process group is terminated
 // with SIGTERM (so the EXIT trap still runs) and SIGKILLed after a grace
 // period.
-func ShellPostHandler() http.HandlerFunc {
+func ShellPostHandler(cfg *Config) http.HandlerFunc {
+	patterns, override := cfg.envPatterns()
+	if override {
+		log.Printf("agent: env allowlist replaced by %d allowed_envs patterns", len(patterns))
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		q, ok := formParams(w, r)
 		if !ok {
@@ -261,7 +206,7 @@ func ShellPostHandler() http.HandlerFunc {
 		cmd.WaitDelay = 5 * time.Second
 		base := []string(nil)
 		if !strictEnv {
-			base = curatedEnv(os.Environ())
+			base = curatedEnv(os.Environ(), patterns, override)
 		}
 		cmd.Env = applyEnvOverrides(base, env)
 		stdout, err := cmd.StdoutPipe()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,9 +18,24 @@ import (
 func main() {
 	agent.ReapZombies()
 
-	var listen string
-	flag.StringVar(&listen, "listen", ":19173", "http listen address")
+	var config string
+	flag.StringVar(&config, "config", agent.DefaultConfigPath, "config file path")
 	flag.Parse()
+
+	// The config file carries every setting except its own path: absent
+	// is fine (defaults), present but invalid is a hard failure —
+	// misconfiguration must not boot silently.
+	cfg, err := agent.LoadConfig(config)
+	switch {
+	case err == nil:
+		log.Println("config loaded from", config)
+	case errors.Is(err, fs.ErrNotExist):
+		log.Println("no config file at", config, "— running with defaults")
+		cfg = agent.NewConfig()
+	default:
+		log.Println("config:", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -36,13 +52,13 @@ func main() {
 	mux.HandleFunc("POST /agent/v1/tar/upload", agent.TarUploadHandler())
 	mux.HandleFunc("GET /agent/v1/dir", agent.DirGetHandler())
 	mux.HandleFunc("PUT /agent/v1/dir", agent.DirPutHandler())
-	mux.HandleFunc("POST /agent/v1/shell", agent.ShellPostHandler())
+	mux.HandleFunc("POST /agent/v1/shell", agent.ShellPostHandler(cfg))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	srv := &http.Server{
-		Addr:              listen,
+		Addr:              cfg.HTTP.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -50,7 +66,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Println("listening on", listen)
+		log.Println("listening on", cfg.HTTP.Listen)
 		errCh <- srv.ListenAndServe()
 	}()
 
