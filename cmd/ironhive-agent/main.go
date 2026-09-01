@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/yankeguo/ironhive/agent"
 )
@@ -65,11 +64,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// No server timeouts of any kind: shell SSE streams and tar/file
+	// transfers legitimately run for the request's whole lifetime, and
+	// slow or stalled peers are the upstream's concern — it hits its own
+	// limits long before we would, so this process must not be the
+	// bottleneck. Concurrency is likewise left unbounded.
 	srv := &http.Server{
-		Addr:              cfg.HTTP.Listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		Addr:    cfg.HTTP.Listen,
+		Handler: mux,
 	}
 
 	errCh := make(chan error, 1)

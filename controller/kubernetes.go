@@ -41,6 +41,13 @@ func NewKubernetesClient(kubeconfig string) (kubernetes.Interface, string, error
 	if err != nil {
 		return nil, "", err
 	}
+	// client-go defaults to 5 QPS / 10 burst — a client-side rate limiter
+	// that would throttle allocate/renew/release patches and reconcile
+	// sweeps under any real churn. Raise it well past plausible load: the
+	// API server enforces its own admission limits, so this process must
+	// not bottleneck itself first.
+	config.QPS = 200
+	config.Burst = 400
 	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, "", fmt.Errorf("kubernetes client (%s): %w", source, err)

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/yankeguo/ironhive/controller"
 )
@@ -61,11 +60,14 @@ func main() {
 		log.Println("pod manager disabled: no kubernetes client")
 	}
 
+	// No server timeouts of any kind: proxied shell SSE streams and
+	// tar/file transfers legitimately run for the request's whole
+	// lifetime, and slow or stalled peers are the upstream's concern —
+	// it hits its own limits long before we would, so this process must
+	// not be the bottleneck. Concurrency is likewise left unbounded.
 	srv := &http.Server{
-		Addr:              cfg.HTTP.Listen,
-		Handler:           controller.NewServer(kube, cfg, pm).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		Addr:    cfg.HTTP.Listen,
+		Handler: controller.NewServer(kube, cfg, pm).Handler(),
 	}
 
 	errCh := make(chan error, 1)

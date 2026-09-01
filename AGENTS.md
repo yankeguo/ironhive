@@ -49,6 +49,7 @@ The agent's API conventions (`agent/files.go`, `README.md` → *ironhive-agent �
 - One `_test.go` per source file, same package. Kubernetes code is tested with `k8s.io/client-go/kubernetes/fake`; HTTP handlers with `httptest`. The `agent/` package is the style benchmark.
 - Both binaries take exactly one flag — `-config` — pointing at a YAML config file; every other setting lives in the file (controller: `http:` / `kubernetes:` / `pools:` sections; agent: `http.listen`, `allowed_envs`). Absent file = defaults, present-but-invalid = startup failure. No environment variables: flag plus default is enough, and the agent's process environment is visible to sandboxed commands (it is their PID 1).
 - Graceful shutdown: `signal.NotifyContext` for SIGINT/SIGTERM, second signal kills, `srv.Shutdown` with no deadline.
+- No HTTP duration or concurrency limits anywhere: the `http.Server`s run with zero timeouts (SSE streams and tar/file transfers last the request's whole lifetime), handlers spawn no semaphores, the Go client sets no `Timeout`, and the Kubernetes client's QPS/burst is raised (200/400) so client-go's rate limiter cannot throttle allocate/renew/release under churn. Upstream hits its own limits long before we would — we must never be the bottleneck.
 - Comments explain *why*, matching the density of the surrounding file.
 
 ### Git
