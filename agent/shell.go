@@ -209,6 +209,13 @@ func ShellPostHandler(cfg *Config) http.HandlerFunc {
 			base = curatedEnv(os.Environ(), patterns, override)
 		}
 		cmd.Env = applyEnvOverrides(base, env)
+		if cmd.Env == nil {
+			// A nil Env makes os/exec inherit the entire process
+			// environment — the exact leak strict_env (and the curated
+			// allowlist) exists to prevent. An empty slice means no
+			// inheritance.
+			cmd.Env = []string{}
+		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
@@ -307,6 +314,12 @@ func scanSSE(rd io.Reader, event string, ch chan<- sseEvent, wg *sync.WaitGroup)
 		!errors.Is(err, io.ErrClosedPipe) &&
 		!errors.Is(err, fs.ErrClosed) {
 		ch <- sseEvent{"error", fmt.Sprintf("%s stream: %v", event, err)}
+		// The scanner gave up reading (e.g. an overlong line); keep
+		// draining or a child that keeps writing wedges on the full
+		// pipe and never exits, hanging shellChildren.wait. The drain
+		// ends at child EOF or when Wait closes the parent pipe ends
+		// on exit/cancel.
+		_, _ = io.Copy(io.Discard, rd)
 	}
 }
 

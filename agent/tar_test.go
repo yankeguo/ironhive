@@ -3,6 +3,7 @@ package agent
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -194,6 +195,54 @@ func TestTarPutErrors(t *testing.T) {
 	}
 	if rec := putTar(t, f, &bytes.Buffer{}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("existing file target: status = %d, want 400", rec.Code)
+	}
+}
+
+// buildTarRawName builds a one-entry archive like buildTar, then rewrites
+// the entry name to rawName and fixes the header checksum. tar.Writer
+// refuses to encode such names, but a hostile client can send them.
+func buildTarRawName(t *testing.T, rawName string, typ byte) *bytes.Buffer {
+	t.Helper()
+	buf := buildTar(t, []tarEntry{{name: "x", typ: typ, mode: 0o644, body: "x"}})
+	b := buf.Bytes()
+	if len(rawName) > 100 {
+		t.Fatalf("rawName %q exceeds the 100-byte name field", rawName)
+	}
+	for i := 0; i < 100; i++ {
+		b[i] = 0
+	}
+	copy(b, rawName)
+	// Recompute the header checksum (bytes 148-155, stored as octal).
+	for i := 148; i < 156; i++ {
+		b[i] = ' '
+	}
+	var sum int
+	for i := 0; i < 512; i++ {
+		sum += int(b[i])
+	}
+	copy(b[148:], fmt.Sprintf("%06o\x00 ", sum))
+	return buf
+}
+
+func TestTarPutMalformedRegularName(t *testing.T) {
+	// Regular entries naming the destination itself ("", ".", "./") or
+	// carrying a trailing slash are malformed; they must be rejected as
+	// 400, not fail late with a raw EISDIR (500).
+	for _, name := range []string{".", "./", "sub/"} {
+		dest := t.TempDir()
+		rec := putTar(t, dest, buildTarRawName(t, name, tar.TypeReg))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("entry %q: status = %d, want 400 (%s)", name, rec.Code, rec.Body)
+		}
+	}
+	// A directory entry naming the destination itself stays legal.
+	dest := t.TempDir()
+	rec := putTar(t, dest, buildTar(t, []tarEntry{
+		{name: "./", typ: tar.TypeDir, mode: 0o755},
+		{name: "f.txt", typ: tar.TypeReg, mode: 0o644, body: "ok"},
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dir ./ entry: status = %d, want 200 (%s)", rec.Code, rec.Body)
 	}
 }
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"mime"
 	"net/http"
@@ -56,16 +57,22 @@ func resolveFilePath(p string) (string, error) {
 	return filepath.Join(wd, p), nil
 }
 
-// fileLocks holds one mutex per absolute path, serializing GET/PUT (and
-// future) operations on the same file so concurrent requests cannot
-// interleave. Entries are never evicted — paths handled by this agent are
-// expected to be bounded.
-var fileLocks sync.Map // map[string]*sync.Mutex
+// fileLockCount bounds the lock table. Paths are caller-controlled and
+// unbounded, so one mutex per path (a sync.Map) would grow memory
+// forever; a fixed stripe of mutexes cannot.
+const fileLockCount = 1024
 
-// lockPath locks the per-path mutex for p and returns the unlock function.
+// fileLocks serializes GET/PUT (and future) operations on the same file
+// so concurrent requests cannot interleave. Paths are hashed into the
+// fixed stripe, so same-path operations always serialize while distinct
+// paths only serialize on an occasional hash collision.
+var fileLocks [fileLockCount]sync.Mutex
+
+// lockPath locks the stripe mutex for p and returns the unlock function.
 func lockPath(p string) func() {
-	m, _ := fileLocks.LoadOrStore(p, &sync.Mutex{})
-	mu := m.(*sync.Mutex)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(p))
+	mu := &fileLocks[h.Sum32()%fileLockCount]
 	mu.Lock()
 	return mu.Unlock
 }

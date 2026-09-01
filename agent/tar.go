@@ -408,6 +408,13 @@ func extractTar(rd io.Reader, dest string, filter *tarFilter) error {
 				mtime time.Time
 			}{target, tarPerm(hdr, 0o755), hdr.ModTime})
 		case tar.TypeReg, tar.TypeRegA:
+			// A regular entry must name a file below dest: names like
+			// "", "." or "./" join to dest itself, and a trailing "/"
+			// names a directory — both would fail late in OpenFile
+			// with a raw EISDIR, misreported as a 500.
+			if target == dest || strings.HasSuffix(hdr.Name, "/") {
+				return fmt.Errorf("tar: %w: regular entry %q names a directory", errBadTar, hdr.Name)
+			}
 			if !filter.included(hdr.Name) {
 				continue
 			}

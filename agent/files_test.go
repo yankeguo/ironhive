@@ -372,6 +372,38 @@ func TestFilesUploadErrors(t *testing.T) {
 	}
 }
 
+func TestFilesConcurrentDistinctPaths(t *testing.T) {
+	// Distinct paths take different stripe locks (barring rare hash
+	// collisions); concurrent puts must all land intact. Run under
+	// -race to cover the striped lock table.
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf("value-%02d", i)
+			p := filepath.Join(dir, fmt.Sprintf("file-%02d.txt", i))
+			for j := 0; j < 20; j++ {
+				if rec := put(t, putTarget(p, ""), body); rec.Code != http.StatusOK {
+					t.Errorf("put: status = %d (%s)", rec.Code, rec.Body)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < 16; i++ {
+		data, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("file-%02d.txt", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf("value-%02d", i); string(data) != want {
+			t.Fatalf("file-%02d.txt = %q, want %q", i, data, want)
+		}
+	}
+}
+
 func TestFilesConcurrentSamePath(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "shared.txt")

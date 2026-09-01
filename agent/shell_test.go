@@ -225,6 +225,54 @@ func TestShellStrictEnv(t *testing.T) {
 	}
 }
 
+func TestShellStrictEnvEmpty(t *testing.T) {
+	// strict_env=true with no env entries: the command environment must
+	// be empty — not the process environment, which cmd.Env == nil
+	// would silently inherit.
+	t.Setenv("IHR_LEAK_MARKER", "leaked")
+	_, events := postShell(t, url.Values{
+		"command":    {"echo marker=${IHR_LEAK_MARKER-unset}"},
+		"strict_env": {"true"},
+	})
+	stdout := eventData[string](t, events, "stdout")
+	if len(stdout) != 1 || stdout[0] != "marker=unset" {
+		t.Fatalf("stdout events = %v, process environment leaked", stdout)
+	}
+	// The env event, reported from the command's own `env -0` snapshot,
+	// must not contain the marker either.
+	env := eventData[map[string]string](t, events, "env")
+	if len(env) != 1 {
+		t.Fatalf("env events = %d, want 1", len(env))
+	}
+	if _, ok := env[0]["IHR_LEAK_MARKER"]; ok {
+		t.Fatalf("reported env contains IHR_LEAK_MARKER: %v", env[0])
+	}
+}
+
+func TestShellOverlongLine(t *testing.T) {
+	// A single output line beyond the scanner's 1MiB cap fails the
+	// scanner; the handler must still drain the pipe, let the command
+	// exit, and finish the stream with error and exit events.
+	done := make(chan []capturedEvent, 1)
+	go func() {
+		_, events := runShell(t, `head -c 2000000 /dev/zero | tr '\0' 'a'; echo; echo AFTER`)
+		done <- events
+	}()
+	var events []capturedEvent
+	select {
+	case events = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("request hung after an overlong output line")
+	}
+	if errs := eventData[string](t, events, "error"); len(errs) != 1 {
+		t.Fatalf("error events = %v, want exactly 1", errs)
+	}
+	exit := eventData[string](t, events, "exit")
+	if len(exit) != 1 || exit[0] != "0" {
+		t.Fatalf("exit events = %v, want 0", exit)
+	}
+}
+
 func TestCuratedEnv(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin",
