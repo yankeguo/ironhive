@@ -115,6 +115,9 @@ After the command exits, an EXIT trap snapshots its final pwd and environment, r
 The response is `text/event-stream`; `data` is JSON-encoded:
 
 ```
+event: pid
+data: 1234
+
 event: stdout
 data: "hello"
 
@@ -131,7 +134,7 @@ event: env
 data: {"HOME":"/root","PATH":"/usr/bin", ...}
 ```
 
-One `stdout`/`stderr` event per output line; stream or spawn failures also produce an `error` event. A final `exit` event carries the exit code (128+signal when the command died to a signal, e.g. `143` for SIGTERM), followed by the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
+The first event is `pid`, sent right after spawn: bash runs in its own process group, so the pid is also the pgid and another shell call can signal the whole tree with `kill -SIGNAL -<pid>` (early cancel, `SIGUSR1`-style triggers, ...). One `stdout`/`stderr` event per output line; stream or spawn failures also produce an `error` event. A final `exit` event carries the exit code (128+signal when the command died to a signal, e.g. `143` for SIGTERM), followed by the `cwd` and `env` snapshots. The snapshots are absent when the command was `SIGKILL`ed before its EXIT trap ran.
 
 If the client disconnects, the command's whole **process group** (bash plus any pipeline or subshell children) receives `SIGTERM` — the wrapper's `EXIT` trap still saves the state snapshot — and the process is `SIGKILL`ed after a 5-second grace period. Disconnecting is therefore a reliable cancel; a command whose descendants ignore `SIGTERM` may leave orphans behind, which are reparented to PID 1 and reaped when they eventually die.
 
@@ -140,6 +143,7 @@ If the client disconnects, the command's whole **process group** (bash plus any 
 The agent is deliberately low-level; the harness (timeouts, budget enforcement, session policy) lives upstream in the controller / LLM agent. The levers available to the upstream:
 
 - **Cancel / timeout** — close the connection. There is no server-side timeout by design; the upstream enforces its own deadline and disconnects, which triggers the teardown described above.
+- **Process signals** — the `pid` event names the command's process group (bash is its leader), so another shell call's `kill -SIGNAL -<pid>` delivers any signal to the whole tree: early cancel without disconnecting, `SIGUSR1`-style triggers, `SIGSTOP`/`SIGCONT`, ...
 - **Output capping** — read until you have enough, then disconnect. The agent streams unbounded output line by line and never truncates; the upstream decides when a command has said enough.
 - **Background processes** — `nohup cmd &` (or plain `cmd &`) works: the handler does not hang on backgrounded grandchildren holding the output pipes open, and re-parented orphans are reaped by PID 1. Job tracking, if wanted, is upstream bookkeeping.
 - **Session composition** — shell calls are stateless and parallel; the `cwd`/`env` events at the end of each stream report the command's final state, and the `cwd`/`env` form fields (plus `strict_env=true`) seed the next call. The harness decides whether calls share a session, fork one, or stay independent — LLMs tend to assume state persists between calls, and this is the mechanism to honor that assumption where wanted.

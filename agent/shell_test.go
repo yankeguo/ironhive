@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,23 @@ func TestShellStdoutStderrExit(t *testing.T) {
 	exit := eventData[string](t, events, "exit")
 	if len(exit) != 1 || exit[0] != "0" {
 		t.Fatalf("exit events = %v", exit)
+	}
+}
+
+func TestShellPIDEvent(t *testing.T) {
+	_, events := runShell(t, "echo $$")
+	if len(events) == 0 || events[0].event != "pid" {
+		t.Fatalf("first event = %+v, want pid", events[0])
+	}
+	pid := eventData[int](t, events, "pid")
+	if len(pid) != 1 || pid[0] <= 0 {
+		t.Fatalf("pid events = %v", pid)
+	}
+	// The reported pid is the bash pid the command itself sees ($$), and
+	// its process group id — so `kill -SIGNAL -<pid>` reaches the tree.
+	stdout := eventData[string](t, events, "stdout")
+	if len(stdout) != 1 || stdout[0] != strconv.Itoa(pid[0]) {
+		t.Fatalf("stdout events = %v, want the reported pid %d", stdout, pid[0])
 	}
 }
 

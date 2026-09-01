@@ -129,6 +129,10 @@ func CheckBash() error {
 //
 // Output streams back as server-sent events:
 //
+//	event: pid             — data: <json number, sent right after spawn;
+//	      bash runs in its own process group (Setpgid), so the pid is also
+//	      the pgid: `kill -SIGNAL -<pid>` from another shell call signals
+//	      the whole tree (early cancel, SIGUSR1-style triggers, ...)>
 //	event: stdout / stderr — data: <json string, one per output line>
 //	event: exit            — data: <json string, exit code; 128+signal when
 //	      the command died to a signal, e.g. 143 for SIGTERM; -1 when the
@@ -252,6 +256,11 @@ func ShellPostHandler(cfg *Config) http.HandlerFunc {
 			writeSSE(w, flusher, "exit", "127")
 			return
 		}
+		// Report the pid first thing: bash is its own process group leader
+		// (Setpgid above), so the upstream can signal the whole tree from
+		// another shell call (`kill -USR1 -<pid>`, early `kill -TERM -<pid>`,
+		// ...) without waiting for the command to produce output.
+		writeSSE(w, flusher, "pid", cmd.Process.Pid)
 
 		events := make(chan sseEvent, 64)
 		var wg sync.WaitGroup

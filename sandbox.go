@@ -265,16 +265,21 @@ type ShellOptions struct {
 
 // ShellEvent is one server-sent event of a shell call.
 type ShellEvent struct {
-	// Type is the SSE event name: stdout, stderr, error, exit, cwd or env.
+	// Type is the SSE event name: pid, stdout, stderr, error, exit, cwd
+	// or env.
 	Type string
 	// Data is the payload: the decoded text for stdout / stderr / exit /
-	// cwd / error events, or the raw JSON object for env.
+	// cwd / error events, the raw JSON number for pid (strconv.Atoi
+	// parses it; the pid is also the command's process group id, so
+	// `kill -SIGNAL -<pid>` from another shell call signals the whole
+	// tree), or the raw JSON object for env.
 	Data string
 }
 
 // Shell runs command via bash inside the sandbox and streams events to
-// onEvent: one stdout / stderr event per output line, a final exit event
-// with the exit code, then cwd / env snapshots. Cancelling ctx
+// onEvent: a pid event right after spawn, one stdout / stderr event per
+// output line, a final exit event with the exit code, then cwd / env
+// snapshots. Cancelling ctx
 // disconnects, which makes the agent SIGTERM the command's whole process
 // group — the reliable cancel mechanism. Command failures are reported as
 // error and non-zero exit events, not as this method's return error. A nil
