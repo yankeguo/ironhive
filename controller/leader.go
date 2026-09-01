@@ -78,12 +78,13 @@ func (m *PodManager) RunLeaderElection(ctx context.Context) {
 		},
 	}
 
-	// RunOrDie returns for good once renewal has failed past
-	// RenewDeadline — leadership loss ends the whole election, not just
-	// the term. Rejoin so this replica reconciles again later; that is
-	// safe because every reconcile pass starts from an authoritative
-	// List and the initial-list gate is still satisfied by the running
-	// watch.
+	// A LeaderElector gives up for good when it loses the lease (renew
+	// failing past RenewDeadline, e.g. a brief API server blip), so the
+	// election is re-entered with backoff — otherwise this replica would
+	// silently stop reconciling until it is restarted. client-go forbids
+	// reusing a LeaderElector, but RunOrDie builds a fresh one from the
+	// config on every pass.
+	backoff := leaderRetryPeriod
 	for ctx.Err() == nil {
 		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
 			Lock:          lock,
@@ -108,5 +109,15 @@ func (m *PodManager) RunLeaderElection(ctx context.Context) {
 				},
 			},
 		})
+		if ctx.Err() != nil {
+			return
+		}
+		log.Println("pod manager:", id, "re-entering leader election in", backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, leaderLeaseDuration)
 	}
 }

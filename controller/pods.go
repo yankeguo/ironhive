@@ -56,6 +56,13 @@ var (
 	ErrSandboxNotAllocated = errors.New("sandbox not allocated")
 )
 
+// stuckStandbyTimeout bounds how long an unallocated pod may stay
+// unallocatable before reconcile replaces it. A pod stuck Pending (e.g.
+// ImagePullBackOff) is neither a shortage — top-up would not fire — nor a
+// candidate, so without the sweep the pool would converge on N dead pods
+// and every allocate would 503 forever.
+const stuckStandbyTimeout = 10 * time.Minute
+
 // podSelector selects exactly the pods this controller manages.
 var podSelector = labels.SelectorFromSet(labels.Set{
 	LabelManagedBy: ManagedByValue,
@@ -345,6 +352,16 @@ func (m *PodManager) reconcileStates(ctx context.Context, pods []PodState) {
 				// Allocated pods are left alone: a client is using them and
 				// the lease expiry will reclaim them in time.
 				sweeps = append(sweeps, targetFor(p, "stale-template"))
+				continue
+			}
+			if !p.CreatedAt.IsZero() && now.Sub(p.CreatedAt) > stuckStandbyTimeout && !readyStandby(*p) {
+				// A standby pod that never became allocatable within the
+				// timeout (ImagePullBackOff, Pending forever) is neither a
+				// shortage nor a candidate — delete it so top-up replaces
+				// it with a fresh one. The API server always sets the
+				// creation timestamp, so a zero CreatedAt means the age is
+				// unknown; do not sweep on an unknown age.
+				sweeps = append(sweeps, targetFor(p, "stuck-standby"))
 				continue
 			}
 			standby[p.Pool] = append(standby[p.Pool], *p)
@@ -657,6 +674,18 @@ func (m *PodManager) Renew(ctx context.Context, name string, lease time.Duration
 	}
 	if !st.Allocated {
 		return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotAllocated, name)
+	}
+	// A terminating pod is already unproxiable (the agent proxy answers
+	// 404 for it); renewing it would promise time the pod does not have.
+	if st.Deleting {
+		return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
+	}
+	// An expired lease is already a reconcile sweep target; renewing it
+	// could win the resourceVersion race and keep a dead sandbox alive.
+	// The client must allocate a fresh one. A zero LeaseExpires is far in
+	// the past, matching the reconcile classification.
+	if time.Now().After(st.LeaseExpires) {
+		return PodState{}, fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
 	}
 	// No resourceVersion precondition: renewal only pushes the deadline
 	// forward, so last write wins is fine.

@@ -48,15 +48,17 @@ func main() {
 	defer stop()
 
 	// The pod manager keeps standby pods warm; like the client it is
-	// best-effort — without pools or a cluster the API still serves.
+	// best-effort — without a cluster the API still serves. It runs
+	// even with zero pools configured: reconcile then sweeps whatever
+	// managed pods a previous configuration left behind.
 	var pm *controller.PodManager
-	if kube != nil && len(cfg.Pools) > 0 {
+	if kube != nil {
 		pm = controller.NewPodManager(kube, cfg.Kubernetes.Namespace, cfg)
 		go pm.Run(ctx)               // watch loop, every replica
 		go pm.RunLeaderElection(ctx) // reconcile loop, leader only
-		log.Printf("pod manager started in namespace %s", cfg.Kubernetes.Namespace)
+		log.Printf("pod manager started in namespace %s with %d pool(s)", cfg.Kubernetes.Namespace, len(cfg.Pools))
 	} else {
-		log.Println("pod manager disabled: no pools configured or no kubernetes client")
+		log.Println("pod manager disabled: no kubernetes client")
 	}
 
 	srv := &http.Server{

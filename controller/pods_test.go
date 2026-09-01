@@ -873,3 +873,127 @@ func TestReconcileKeepsAllocatedPodWithStaleTemplate(t *testing.T) {
 		t.Fatalf("after recycle+top-up: %d pods, want 3", len(pods.Items))
 	}
 }
+
+func TestReconcileSweepsStuckStandbyPod(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(2))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	stuck := m.Pods()[0].Name
+	// Created long ago and still not Ready, e.g. ImagePullBackOff.
+	m.mu.Lock()
+	m.pods[stuck].CreatedAt = time.Now().Add(-2 * stuckStandbyTimeout)
+	m.mu.Unlock()
+
+	m.reconcile(ctx)
+
+	if _, err := kube.CoreV1().Pods("ironhive").Get(ctx, stuck, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stuck standby pod still exists: %v", err)
+	}
+	// The pool is topped back up with a fresh pod.
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("after stuck sweep+top-up: %d pods, want 2", len(pods.Items))
+	}
+	if got := len(m.Pods()); got != 2 {
+		t.Fatalf("cache has %d pods, want 2", got)
+	}
+}
+
+func TestReconcileKeepsYoungUnreadyStandbyPod(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	young := m.Pods()[0].Name
+	// Still pulling its image — well inside the stuck timeout.
+	m.mu.Lock()
+	m.pods[young].CreatedAt = time.Now()
+	m.mu.Unlock()
+
+	m.reconcile(ctx)
+
+	if _, err := kube.CoreV1().Pods("ironhive").Get(ctx, young, metav1.GetOptions{}); err != nil {
+		t.Fatalf("young unready pod was swept: %v", err)
+	}
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("reconcile changed the pool: %d pods, want 1", len(pods.Items))
+	}
+}
+
+func TestRenewDeletingPodIsNotFound(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	st, err := m.Allocate(ctx, "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Kubernetes accepted deletion between the allocation and the renew.
+	m.mu.Lock()
+	m.pods[st.Name].Deleting = true
+	m.mu.Unlock()
+	if _, err := m.Renew(ctx, st.Name, time.Hour); !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("renew deleting pod: want ErrSandboxNotFound, got %v", err)
+	}
+}
+
+func TestRenewExpiredLeaseIsNotFound(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	st, err := m.Allocate(ctx, "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The lease expired but reconcile has not swept the pod yet.
+	m.mu.Lock()
+	m.pods[st.Name].LeaseExpires = time.Now().Add(-time.Minute)
+	m.mu.Unlock()
+	if _, err := m.Renew(ctx, st.Name, time.Hour); !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("renew expired lease: want ErrSandboxNotFound, got %v", err)
+	}
+}
+
+func TestReconcileSweepsLeftoverPodsWithoutPools(t *testing.T) {
+	// A managed pod left behind by a configuration that no longer has any
+	// pool — reconcile must still garbage-collect it.
+	existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:            "sandbox-leftover",
+		Namespace:       "ironhive",
+		ResourceVersion: "3",
+		Labels: map[string]string{
+			LabelManagedBy: ManagedByValue,
+			LabelPool:      "default",
+		},
+	}}
+	kube := fake.NewSimpleClientset(existing)
+	m := NewPodManager(kube, "ironhive", &Config{})
+
+	m.reconcileFresh(context.Background())
+
+	pods, err := kube.CoreV1().Pods("ironhive").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("leftover pods = %d, want 0", len(pods.Items))
+	}
+}

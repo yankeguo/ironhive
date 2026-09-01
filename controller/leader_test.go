@@ -202,3 +202,74 @@ func TestLeaderWaitsForInitialList(t *testing.T) {
 		t.Fatalf("restart produced %d pods, want the existing one only", len(pods.Items))
 	}
 }
+
+func TestLeaderReentersElectionAfterLosingLease(t *testing.T) {
+	shrinkLeaderTimings(t)
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.Run(ctx)
+	go m.RunLeaderElection(ctx)
+
+	// Wait for the first leadership and remember the identity — it stays
+	// the same across election rounds of one RunLeaderElection call.
+	var identity string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+		if err == nil && lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" {
+			identity = *lease.Spec.HolderIdentity
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica did not become leader")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Preempt the Lease: another holder with a fresh renew time makes this
+	// replica's renews fail until RenewDeadline ends its leadership — what
+	// a brief API server outage looks like to the elector. The renew may
+	// race the update, so retry on conflict.
+	for {
+		lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		preemptor := "preemptor"
+		now := metav1.MicroTime{Time: time.Now()}
+		lease.Spec.HolderIdentity = &preemptor
+		lease.Spec.RenewTime = &now
+		if _, err := kube.CoordinationV1().Leases("ironhive").Update(ctx, lease, metav1.UpdateOptions{}); err == nil {
+			break
+		} else if !apierrors.IsConflict(err) {
+			t.Fatal(err)
+		}
+	}
+
+	// The preemptor never renews, so its lease expires; this replica must
+	// re-enter the election and win it back under the same identity —
+	// the first elector can never lead again once it has stopped.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		lease, err := kube.CoordinationV1().Leases("ironhive").Get(ctx, leaderLeaseName, metav1.GetOptions{})
+		if err == nil && lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == identity {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica did not regain leadership after losing the lease")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And it reconciles again: the pool sits at its configured size.
+	pods, err := kube.CoreV1().Pods("ironhive").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("after regaining leadership: %d pods, want 1", len(pods.Items))
+	}
+}

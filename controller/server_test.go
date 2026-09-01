@@ -387,3 +387,42 @@ func TestAgentProxySanitizesInvalidTarget(t *testing.T) {
 		t.Fatalf("message = %q", envelope["message"])
 	}
 }
+
+func TestRenewRejectsDeletingAndExpiredSandbox(t *testing.T) {
+	s := testServerWithPods(t)
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	name := allocateViaHTTP(t, srv.URL)
+
+	// A terminating sandbox cannot be renewed — the pod is going away.
+	s.Pods.mu.Lock()
+	s.Pods.pods[name].Deleting = true
+	s.Pods.mu.Unlock()
+	resp := postForm(t, srv.URL+"/controller/v1/renew", url.Values{"sandbox": {name}, "lease": {"1h"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("renew terminating sandbox: status %d, want 404", resp.StatusCode)
+	}
+
+	// Neither can one whose lease has already expired.
+	s.Pods.mu.Lock()
+	s.Pods.pods[name].Deleting = false
+	s.Pods.pods[name].LeaseExpires = time.Now().Add(-time.Minute)
+	s.Pods.mu.Unlock()
+	resp = postForm(t, srv.URL+"/controller/v1/renew", url.Values{"sandbox": {name}, "lease": {"1h"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("renew expired sandbox: status %d, want 404", resp.StatusCode)
+	}
+
+	// A live sandbox still renews.
+	s.Pods.mu.Lock()
+	s.Pods.pods[name].LeaseExpires = time.Now().Add(time.Minute)
+	s.Pods.mu.Unlock()
+	resp = postForm(t, srv.URL+"/controller/v1/renew", url.Values{"sandbox": {name}, "lease": {"1h"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("renew live sandbox: status %d, want 200", resp.StatusCode)
+	}
+}
