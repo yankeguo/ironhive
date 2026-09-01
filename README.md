@@ -97,7 +97,7 @@ As **PID 1** it reaps orphaned zombies itself, so the image needs no tini — an
 | `PUT /agent/v1/dir?path=` | Create a directory like `mkdir -p`. Optional `chmod` / `chown`, same syntax as `PUT /agent/v1/file` (default mode `0755`) |
 | `POST /agent/v1/shell` | Run the form field `command` via bash and stream output as server-sent events (see below). Optional form fields: `cwd` (working directory; absolute or relative to the process working directory), repeatable `env` (`KEY=VALUE` entries), and `strict_env` (boolean; see below). Calls are stateless and run concurrently |
 
-Parameter passing convention: **PUT** endpoints take parameters only in the query string — the body is the data stream, or empty; **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts).
+Parameter passing convention: **PUT** endpoints take parameters only in the query string — the body is the data stream, or empty; **POST** endpoints accept parameters in the query string, the urlencoded form body, or both (body entries win on conflicts). Note that Go's form parser rejects an unencoded `;` in either channel — hand-written requests must percent-encode it as `%3B` (matters for `command`; the Go client encodes for you).
 
 File operations on the same absolute path are serialized with a per-path mutex.
 
@@ -105,7 +105,7 @@ Endpoints that do not return data answer with a JSON envelope `{"message": ...}`
 
 ### Shell sessions
 
-`POST /agent/v1/shell` runs each command in a fresh bash — calls share nothing and run concurrently. The optional `cwd` field sets the working directory for that call only. The command's environment is assembled from two inputs:
+`POST /agent/v1/shell` runs each command in a fresh bash — calls share nothing and run concurrently. The image must provide `bash` on the agent's own `PATH` (it is resolved when the call starts, so a request's `env=PATH=...` does not affect the lookup). The optional `cwd` field sets the working directory for that call only. The command's environment is assembled from two inputs:
 
 - the repeatable `env` field (`KEY=VALUE` entries), and
 - unless `strict_env=true`, a curated subset of the process environment — generic vars like `PATH` / `HOME` / `USER` / `LANG` / `LC_*` / `TERM` / `TZ` / `TMPDIR`, with platform-injected vars (Kubernetes `*_SERVICE_HOST` / `*_SERVICE_PORT`, credentials, pod metadata) deliberately dropped so sandboxed commands cannot observe their environment. An image can replace this list entirely via `/opt/ironhive/etc/agent.yml`: set `allowed_envs` to a list of wildcard patterns (`*` / `?` / `[...]`), e.g. `[PATH, HOME, "APP_*", JAVA_OPTS]`; when the field (or the file) is absent, the curated defaults apply. With `strict_env=true` the command environment is exactly the `env` entries.
