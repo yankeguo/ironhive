@@ -37,6 +37,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// bash is a hard dependency (wrapper syntax and caller commands), so
+	// an image without a working one fails the boot — loudly, in the pod
+	// logs — instead of failing the first shell call.
+	if err := agent.CheckBash(); err != nil {
+		log.Println("fatal:", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

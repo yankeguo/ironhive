@@ -358,6 +358,19 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+// TestCheckBash: the startup probe accepts a real bash and fails fast when
+// none is on PATH — the lookup follows the process PATH, same as the
+// handler's spawn.
+func TestCheckBash(t *testing.T) {
+	if err := CheckBash(); err != nil {
+		t.Fatalf("CheckBash with bash on PATH: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	if err := CheckBash(); err == nil {
+		t.Fatal("CheckBash without bash on PATH: want error, got nil")
+	}
+}
+
 // TestShellQueryParams: POST endpoints accept parameters in the query
 // string as well as the form body.
 func TestShellQueryParams(t *testing.T) {

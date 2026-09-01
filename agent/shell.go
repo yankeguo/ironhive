@@ -91,6 +91,27 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// CheckBash enforces the agent's hard bash dependency at startup. The
+// shell wrapper's state snapshot (trap ... EXIT) and the commands callers
+// generate both assume real bash syntax, and bash is resolved against the
+// agent's own PATH at spawn time — a request's env=PATH=... never affects
+// that lookup — so a missing or fake (e.g. dash-linked) bash must fail the
+// boot loudly, not the first shell call with a confusing exec error.
+func CheckBash() error {
+	path, err := exec.LookPath("bash")
+	if err != nil {
+		return fmt.Errorf("bash not found on the agent's PATH: %w", err)
+	}
+	// Probe the exact constructs the shell wrapper relies on, and reject
+	// shells that merely answer to the name: $BASH_VERSION is unset in
+	// POSIX sh lookalikes.
+	out, err := exec.Command(path, "-c", `trap ':' EXIT; test -n "$BASH_VERSION"`).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bash at %s failed the wrapper probe: %w (%s)", path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // ShellPostHandler serves POST /agent/v1/shell, running the "command" parameter
 // via bash. Parameters may arrive in the query string, the urlencoded form
 // body, or both (body wins on conflicts). The shell is stateless: every
