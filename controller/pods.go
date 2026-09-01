@@ -711,6 +711,12 @@ func (m *PodManager) Release(ctx context.Context, name string) error {
 	if !st.Allocated {
 		return fmt.Errorf("%w: %q", ErrSandboxNotAllocated, name)
 	}
+	// A terminating pod re-enters the cache through the watch's Modified
+	// event before the Deleted one arrives; deleting it again would
+	// succeed, so a repeated release must be rejected here to answer 404.
+	if st.Deleting {
+		return fmt.Errorf("%w: %q", ErrSandboxNotFound, name)
+	}
 	if err := m.kube.CoreV1().Pods(m.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted concurrently — the outcome the caller wanted.

@@ -425,6 +425,29 @@ func TestReleaseStandbyPodFails(t *testing.T) {
 	}
 }
 
+func TestReleaseDeletingPodIsNotFound(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	m := NewPodManager(kube, "ironhive", testPoolConfig(1))
+	ctx := context.Background()
+
+	m.reconcile(ctx)
+	markReady(m)
+	st, err := m.Allocate(ctx, "default", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The watch's Modified event re-adds a terminating pod (still carrying
+	// the allocated annotation) before the Deleted event drops it; a
+	// repeated release in that window must not report success again.
+	m.mu.Lock()
+	m.pods[st.Name].Deleting = true
+	m.mu.Unlock()
+	if err := m.Release(ctx, st.Name); !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("release deleting pod: want ErrSandboxNotFound, got %v", err)
+	}
+}
+
 func TestReconcileReplacesAllocatedPod(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	m := NewPodManager(kube, "ironhive", testPoolConfig(2))
